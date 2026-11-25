@@ -114,7 +114,7 @@ function menuAnchorFromEvent(event: React.MouseEvent): MenuAnchor {
   };
 }
 
-/** A bubble states its task with a glyph; the words stay for tooltips and assistive tech. */
+/** A bubble states its task with a glyph; the words stay for assistive tech. */
 const TASK_STATE_GLYPHS: Record<AgentCompanionTaskState, LucideIcon> = {
   running: LucideLoaderCircle,
   waiting: LucideHourglass,
@@ -810,6 +810,24 @@ export const AgentCompanionDesktopPet: React.FC = () => {
       });
   }, [sendPetCommand]);
 
+  /** Bubble menu: acknowledge every finished bubble at once, like the sidebar. */
+  const markAllBubblesRead = useCallback(() => {
+    setOverlay(null);
+    setDismissedBubbles(previous => {
+      const next = { ...previous };
+      for (const task of tasks) {
+        if (isAcknowledgeableTaskState(task.state)) {
+          next[task.sessionId] = bubbleDismissBucket(task.state);
+        }
+      }
+      return next;
+    });
+    void sendPetCommand({ type: 'mark-all-read' })
+      .catch(error => {
+        log.warn('Failed to mark all Agent companion tasks read', error);
+      });
+  }, [sendPetCommand, tasks]);
+
   const openBubbleComposer = useCallback((sessionId: string) => {
     setComposerValue('');
     setIsSendingComposer(false);
@@ -1087,11 +1105,18 @@ export const AgentCompanionDesktopPet: React.FC = () => {
       { key: 'close-pet', label: t('agentCompanion.menu.closePet'), onClick: closeDesktopPet },
     ]
     : overlay?.kind === 'bubble-menu' && overlayTask
-      ? [{
-        key: 'close-bubble',
-        label: t('agentCompanion.menu.closeBubble'),
-        onClick: () => closeBubble(overlayTask),
-      }]
+      ? [
+        {
+          key: 'close-bubble',
+          label: t('agentCompanion.menu.closeBubble'),
+          onClick: () => closeBubble(overlayTask),
+        },
+        {
+          key: 'mark-all-read',
+          label: t('agentCompanion.menu.markAllRead'),
+          onClick: markAllBubblesRead,
+        },
+      ]
       : [];
 
   return (
@@ -1110,7 +1135,8 @@ export const AgentCompanionDesktopPet: React.FC = () => {
       {menuItems.length > 0 && (
         <Menu
           ref={menuRef}
-          className="openbitfun-agent-companion-window__overlay openbitfun-agent-companion-window__overlay--anchored"
+          className="openbitfun-agent-companion-window__overlay openbitfun-agent-companion-window__overlay--anchored openbitfun-agent-companion-window__context-menu"
+          inlineSize="content"
           style={{
             right: `${menuPosition?.right ?? MENU_EDGE_MARGIN}px`,
             bottom: `${menuPosition?.bottom ?? MENU_EDGE_MARGIN}px`,
@@ -1137,6 +1163,7 @@ export const AgentCompanionDesktopPet: React.FC = () => {
           {visibleTasks.length > 0 && (
             <ScrollArea
               ref={bubblesRef}
+              scrollbarVisibility="hidden"
               className={`openbitfun-agent-companion-window__bubbles${isSingleTask ? ' openbitfun-agent-companion-window__bubbles--single' : ''}`}
               aria-live="polite"
               aria-hidden={!bubblesFit || undefined}
@@ -1164,7 +1191,7 @@ export const AgentCompanionDesktopPet: React.FC = () => {
                         strokeWidth={2.25}
                         aria-hidden="true"
                       />
-                      {/* The bubble's own tooltip carries title and status together. */}
+                      {/* Bubbles show no tooltip; an overflowing title scrolls on hover instead. */}
                       <OverflowText className="openbitfun-agent-companion-window__bubble-title" title="" data-openbitfun-component="agent-companion-desktop-pet" data-openbitfun-part="bubbleTitle">
                         {task.title}
                       </OverflowText>
@@ -1251,7 +1278,6 @@ export const AgentCompanionDesktopPet: React.FC = () => {
                       <button
                         type="button"
                         className={bubbleClassName}
-                        title={`${task.title} · ${statusLabel}`}
                         onClick={() => void openTaskSession(task)}
                         data-openbitfun-component="agent-companion-desktop-pet"
                         data-openbitfun-part="bubble"

@@ -333,6 +333,8 @@ export interface SessionViewRestoreTiming {
 }
 
 export interface RestoreSessionViewResponse {
+  /** Explicit execution authority/capability; absent on older hosts. */
+  executionProjection?: 'acp';
   session: SessionInfo;
   turns: DialogTurnData[];
   /** Absent when talking to an older Peer Host. */
@@ -616,6 +618,8 @@ export interface ListBackgroundCommandActivitiesResponse {
 
  
 export interface ModeInfo {
+  /** Present when the host honored includeSubagentCounts. */
+  manageableSubagentCount?: number;
   id: string;
   name: string;
   description: string;
@@ -1752,11 +1756,14 @@ export class AgentAPI {
   
 
    
-  async getAvailableModes(request: { workspaceId?: string } = {}): Promise<ModeInfo[]> {
+  async getAvailableModes(request: { workspaceId?: string; includeSubagentCounts?: boolean } = {}): Promise<ModeInfo[]> {
     try {
       if (request.workspaceId !== undefined && !request.workspaceId.trim()) throw new Error('Workspace identity is unresolved');
       return translateAgentIdentityFields(await invokePrepared<ModeInfo[]>('get_available_modes', async () => ({
-        request: request.workspaceId !== undefined ? await workspaceIdRequest(request.workspaceId, 'workspacePath') : {},
+        request: {
+          ...(request.workspaceId !== undefined ? await workspaceIdRequest(request.workspaceId, 'workspacePath') : {}),
+          ...(request.includeSubagentCounts ? { includeSubagentCounts: true } : {}),
+        },
       })), 'canonical');
     } catch (error) {
       throw createTauriCommandError('get_available_modes', error);

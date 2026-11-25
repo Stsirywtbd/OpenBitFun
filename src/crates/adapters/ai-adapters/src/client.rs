@@ -13,6 +13,7 @@ pub mod image_generation;
 pub(crate) mod quirks;
 mod request_capacity;
 pub(crate) mod response_aggregator;
+pub(crate) mod responses_websocket;
 pub(crate) mod sse;
 pub(crate) mod utils;
 
@@ -62,6 +63,8 @@ pub struct StreamOptions {
 
 #[derive(Debug, Clone)]
 pub struct AIClient {
+    pub(crate) websocket_client: Client,
+    pub(crate) responses_sessions: Arc<responses_websocket::Sessions>,
     pub(crate) client: Client,
     pub config: AIConfig,
     pub(crate) stream_options: StreamOptions,
@@ -102,8 +105,18 @@ impl AIClient {
         proxy_config: Option<ProxyConfig>,
         stream_options: StreamOptions,
     ) -> Self {
-        let client = http::create_http_client(proxy_config, config.skip_ssl_verify);
+        let client = http::create_model_http_client(
+            proxy_config.clone(),
+            config.skip_ssl_verify,
+            &config.request_url,
+        );
         Self {
+            websocket_client: http::create_websocket_http_client(
+                proxy_config,
+                config.skip_ssl_verify,
+                &config.request_url,
+            ),
+            responses_sessions: Arc::new(responses_websocket::Sessions::default()),
             client,
             config,
             stream_options,
@@ -538,7 +551,11 @@ impl AIClient {
             {
                 Ok(response) => response,
                 Err(error) => {
-                    if attempt == max_attempts - 1 {
+                    if attempt == max_attempts - 1
+                        || error
+                            .downcast_ref::<AiProviderError>()
+                            .is_some_and(|error| error.delivery_uncertain)
+                    {
                         return Err(error);
                     }
                     let delay_ms = send_message_retry_delay_ms_for_error(attempt, &error);
@@ -568,7 +585,11 @@ impl AIClient {
                         &error.to_string(),
                     )
                     .await;
-                    if attempt == max_attempts - 1 {
+                    if attempt == max_attempts - 1
+                        || error
+                            .downcast_ref::<AiProviderError>()
+                            .is_some_and(|error| error.delivery_uncertain)
+                    {
                         return Err(error);
                     }
                     let delay_ms = send_message_retry_delay_ms_for_error(attempt, &error);
@@ -597,6 +618,7 @@ impl AIClient {
         request_context: Option<ModelRequestContext>,
     ) -> Result<StreamResponse> {
         // Project only the outgoing copy, against the actual selected client.
+        responses_websocket::validate(self)?;
         // Account/channel failover and direct analysis calls share this boundary.
         let messages = image_budget::project(messages, self.config.max_images_per_request)?;
         image_budget::validate_extra_body(self.config.max_images_per_request, extra_body.as_ref())?;
@@ -869,7 +891,52 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body,
             custom_request_body_mode: None,
+            responses: None,
         })
+    }
+
+    #[tokio::test]
+    async fn loopback_model_request_override_works_with_outbound_proxy_enabled() {
+        let state = StreamRetryFixtureState {
+            attempts: Arc::new(AtomicUsize::new(1)),
+        };
+        let app = Router::new()
+            .route("/v1/chat/completions", post(malformed_stream_then_success))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!(
+            "http://{}/v1/chat/completions",
+            listener.local_addr().unwrap()
+        );
+        let gateway = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        // An invalid proxy cannot serve the request. The base URL is deliberately
+        // remote: the explicit request override is the actual transport target.
+        let mut config = make_test_client("openai", None).config;
+        config.request_url = endpoint;
+        let client = AIClient::new_with_proxy(
+            config,
+            Some(crate::types::ProxyConfig {
+                enabled: true,
+                url: "http://unavailable-proxy.invalid:8080".into(),
+                ..Default::default()
+            }),
+        );
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            client.send_message(vec![], None),
+        )
+        .await;
+        gateway.abort();
+        assert_eq!(
+            result
+                .expect("local gateway request timed out")
+                .unwrap()
+                .text,
+            "Recovered"
+        );
+        assert_eq!(state.attempts.load(Ordering::SeqCst), 2);
     }
 
     fn make_trim_test_client(format: &str) -> AIClient {
@@ -880,6 +947,7 @@ mod tests {
 
     fn structured_output_context() -> ModelRequestContext {
         ModelRequestContext {
+            conversation_scope: None,
             prompt_cache_route_key: None,
             output_schema: Some(json!({
                 "type": "object",
@@ -891,6 +959,7 @@ mod tests {
     #[test]
     fn chat_prompt_cache_key_is_sent_only_to_the_official_openai_endpoint() {
         let context = ModelRequestContext {
+            conversation_scope: None,
             prompt_cache_route_key: Some("lineage-1".to_string()),
             output_schema: None,
         };
@@ -1334,6 +1403,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "max",
@@ -1368,6 +1438,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "on",
@@ -1401,6 +1472,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "budget",
@@ -1484,6 +1556,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         });
 
         let gemini_tools = GeminiMessageConverter::convert_tools(Some(vec![ToolDefinition {
@@ -1532,6 +1605,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "on",
@@ -1570,6 +1644,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "max",
@@ -1610,6 +1685,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "off",
@@ -1648,6 +1724,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&relayed_reasoning_preset(
             "max",
@@ -1690,6 +1767,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&relayed_reasoning_preset(
             "off",
@@ -1868,6 +1946,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "invalid",
@@ -1908,6 +1987,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "on",
@@ -1946,6 +2026,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         };
 
         let effort_client = AIClient::new(base_config()).with_reasoning_preset(&reasoning_preset(
@@ -2000,6 +2081,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "none",
@@ -2042,6 +2124,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "high",
@@ -2083,6 +2166,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "on",
@@ -2123,6 +2207,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "on",
@@ -2163,6 +2248,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "high",
@@ -2205,6 +2291,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         });
 
         let request_body = anthropic::request::build_request_body(
@@ -2240,6 +2327,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "max",
@@ -2282,6 +2370,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&relayed_reasoning_preset(
             "max",
@@ -2325,6 +2414,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&relayed_reasoning_preset(
             "off",
@@ -2366,6 +2456,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "off",
@@ -2405,6 +2496,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "high",
@@ -2446,6 +2538,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&relayed_reasoning_preset(
             "low",
@@ -2489,6 +2582,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "on",
@@ -2528,6 +2622,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         });
 
         let request_body = anthropic::request::build_request_body(
@@ -2563,6 +2658,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "off",
@@ -2602,6 +2698,7 @@ mod tests {
             skip_ssl_verify: false,
             custom_request_body: None,
             custom_request_body_mode: None,
+            responses: None,
         })
         .with_reasoning_preset(&reasoning_preset(
             "high",

@@ -50,6 +50,13 @@ pub struct AccountHintRecord {
     pub relay_url: String,
 }
 
+/// Unexpired device tokens still in use by other processes during rotation.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupersededDeviceToken {
+    pub token: String,
+    pub expires_at: i64,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct AccountSessionRecord {
     pub token: String,
@@ -57,6 +64,8 @@ pub struct AccountSessionRecord {
     pub master_key: [u8; 32],
     pub relay_url: String,
     pub device_id: Option<String>,
+    pub issued_at: Option<i64>,
+    pub superseded_tokens: Vec<SupersededDeviceToken>,
 }
 
 impl std::fmt::Debug for AccountSessionRecord {
@@ -110,6 +119,27 @@ struct AccountSessionPayload {
     relay_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    issued_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    superseded_tokens: Vec<SupersededDeviceToken>,
+}
+
+/// Whether a stored account session belongs to the same deployed Relay.
+///
+/// `/relay` and `/v/1.0.2` are two live aliases of one deployment, so a stored
+/// master key must survive the endpoint move. Only builds that link the Relay
+/// transport can consult the shared endpoint rules; the persistence-only
+/// configuration keeps its original exact comparison.
+fn same_relay_session_endpoint(stored: &str, current: &str) -> bool {
+    #[cfg(feature = "remote-connect")]
+    {
+        openbitfun_product_domains::account::same_relay_deployment(stored, current)
+    }
+    #[cfg(not(feature = "remote-connect"))]
+    {
+        stored.trim_end_matches('/') == current.trim_end_matches('/')
+    }
 }
 
 pub fn read_device_identity(path: &Path) -> Result<Option<DeviceIdentityRecord>> {
@@ -217,6 +247,8 @@ pub fn write_current_account_session(
         master_key_b64: BASE64.encode(session.master_key),
         relay_url: session.relay_url.clone(),
         device_id: session.device_id.clone(),
+        issued_at: session.issued_at,
+        superseded_tokens: session.superseded_tokens.clone(),
     };
     let plaintext = serde_json::to_vec(&payload).context("serialize account session payload")?;
     let key = derive_current_key(binding, &secret);
@@ -265,6 +297,8 @@ fn decode_account_session_payload(bytes: &[u8]) -> Result<AccountSessionRecord> 
         master_key,
         relay_url: payload.relay_url,
         device_id: payload.device_id,
+        issued_at: payload.issued_at,
+        superseded_tokens: payload.superseded_tokens,
     };
     validate_account_session(&session)?;
     Ok(session)
@@ -945,8 +979,7 @@ pub fn load_or_create_device_secret(
             let secret = previous
                 .filter(|session| {
                     session.user_id == user_id
-                        && session.relay_url.trim_end_matches('/')
-                            == relay_url.trim_end_matches('/')
+                        && same_relay_session_endpoint(&session.relay_url, relay_url)
                         && session.device_id.as_deref() == Some(device_id)
                 })
                 .map(|session| session.master_key)
@@ -1116,6 +1149,8 @@ mod tests {
             v2: b"|retired-product::session_store::v2|",
         };
         let session = AccountSessionRecord {
+            issued_at: None,
+            superseded_tokens: Vec::new(),
             token: "synthetic-token".to_string(),
             user_id: "fixture-account".to_string(),
             master_key: [0x42; 32],
@@ -1248,6 +1283,8 @@ mod tests {
             master_key_b64: BASE64.encode(session.master_key),
             relay_url: session.relay_url.clone(),
             device_id: session.device_id.clone(),
+            issued_at: session.issued_at,
+            superseded_tokens: session.superseded_tokens.clone(),
         };
         let plaintext = serde_json::to_vec(&payload).unwrap();
         let key = derive_legacy_v2_key(binding, local_secret, domains);

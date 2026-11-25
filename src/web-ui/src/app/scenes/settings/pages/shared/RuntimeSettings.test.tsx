@@ -6,6 +6,7 @@ import DeviceControlSettingsPage from '../tools/DeviceControlSettingsPage';
 import ExecutionSettingsPage from '../ai/ExecutionSettingsPage';
 import WorkspaceSearchSection from '../development/WorkspaceSearchSection';
 import { BROWSER_LINK_TARGET_STORAGE_KEY, browserLinkPreferenceStore } from '@/infrastructure/config/services/browserLinkPreference';
+import { activateSurface } from '@/infrastructure/peer-device/deviceSurface';
 
 const mocks = vi.hoisted(() => {
   Object.defineProperty(window, '__TAURI__', { configurable: true, value: {} });
@@ -24,9 +25,27 @@ vi.mock('@/infrastructure/i18n', () => ({
   useI18n: () => ({ t: mocks.t }),
 }));
 vi.mock('@/infrastructure/api/service-api/ApiClient', () => ({ api: { invoke: mocks.invoke } }));
+vi.mock('@/infrastructure/api/service-api/DesktopExternalControlAPI', () => ({
+  desktopControllerSettings: async () => ({
+    enabled: false, listening: false, port: 38371, endpoint: 'http://127.0.0.1:38371/v1',
+    error: null, token: null, grants: [], workspaces: [],
+  }),
+}));
 vi.mock('@/infrastructure/api/service-api/SystemAPI', () => ({ systemAPI: { getSystemInfo: async () => ({ platform: 'macos' }) } }));
 vi.mock('../../../../../infrastructure/config/services/ConfigManager', () => ({ configManager: { hasCachedConfig: () => false, getCachedConfig: () => undefined,
-  getConfig: mocks.getConfig, getOptionalConfig: async (path: string) => path === 'ai.agent_model_selections' ? { mode: { kind: 'model', model_ref: 'primary' }, subagents: { default: { kind: 'model', model_ref: 'fast' }, builtin: {}, fork: { kind: 'inherit' } } } : true, setConfig: mocks.setConfig,
+  getConfig: mocks.getConfig,
+  getOptionalConfig: async (path: string) => {
+    if (path === 'ai.agent_model_selections') return {
+      mode: { kind: 'model', model_ref: 'primary' },
+      subagents: { default: { kind: 'model', model_ref: 'fast' }, builtin: {}, fork: { kind: 'inherit' } },
+    };
+    if (path === 'ai.agent_model_defaults') return {
+      mode: 'primary',
+      subagents: { default: { kind: 'fixed', model_id: 'fast' }, builtin: {}, fork: { kind: 'fixed', model_id: 'primary' } },
+    };
+    return true;
+  },
+  setConfig: mocks.setConfig,
 } }));
 vi.mock('../../../../../infrastructure/config/hooks/useComputerUseEnabled', () => ({ useComputerUseEnabled: () => ({ computerUseEnabled: false, setComputerUseEnabled: mocks.setEnabled }) }));
 vi.mock('../../../../../infrastructure/config/services/AIExperienceConfigService', () => ({ aiExperienceConfigService: { getCachedSettings: () => null, getSettingsAsync: async () => ({ enable_workspace_search: true }) } }));
@@ -42,8 +61,8 @@ vi.mock('../../../../../infrastructure/config/components/GlobalPermissionRulesDi
 vi.mock('../ai/SessionTitleSection', () => ({ default: () => null }));
 vi.mock('../ai/DefaultHarnessSection', () => ({ default: () => <div>default-harness-config</div> }));
 vi.mock('../ai/ReviewCapacitySection', () => ({ default: () => null }));
-vi.mock('../ai/GenUILibrarySection', () => ({ default: () => null }));
 vi.mock('../ai/ToolJsonRepairSection', () => ({ default: () => null }));
+vi.mock('../ai/SubagentModelOverrideSection', () => ({ default: () => null }));
 vi.mock('@openbitfun/ui', async (original) => ({
   ...await original<typeof import('@openbitfun/ui')>(),
   Select: ({ value, options, disabled, onValueChange }: { value: string; options: Array<{ value: string; label: string }>; disabled: boolean; onValueChange?: (value: string) => void }) => (
@@ -128,14 +147,43 @@ describe('Tool execution concurrency settings', () => {
     expect(mocks.error).toHaveBeenCalledWith('messages.saveFailed: Host rejected the concurrency setting');
   });
 });
+describe('Fork subagent model settings', () => {
+  it.each([
+    ['local', 'config.subagentModelInherit', 'sessionTitle.model.primary', 'ai.agent_model_selections.subagents.fork', { kind: 'model', model_ref: 'primary' }],
+    ['legacy-peer', 'sessionTitle.model.primary', 'sessionTitle.model.fast', 'ai.agent_model_defaults.subagents.fork', { kind: 'fixed', model_id: 'fast' }],
+  ])('loads and saves the fork model independently on %s', async (surface, initialLabel, nextLabel, path, selection) => {
+    activateSurface(surface);
+    await act(async () => root.render(<ExecutionSettingsPage />));
+    const forkModel = button('config.forkSubagentDefaultModel');
+    const defaultModel = button('config.subagentDefaultModel');
+    expect(forkModel.textContent).toContain(initialLabel);
+    expect(defaultModel.textContent).toContain('sessionTitle.model.fast');
+
+    await act(async () => forkModel.click());
+    const nextOption = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]'))
+      .find(option => option.textContent === nextLabel)!;
+    await act(async () => nextOption.click());
+
+    expect(mocks.setConfig.mock.calls).toEqual([[path, selection]]);
+    expect(forkModel.textContent).toContain(nextLabel);
+    expect(defaultModel.textContent).toContain('sessionTitle.model.fast');
+  });
+});
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
+  activateSurface('local');
   browserLinkPreferenceStore.setState({ target: 'builtin' });
   localStorage.removeItem(BROWSER_LINK_TARGET_STORAGE_KEY);
 });
 
 describe('Browser and desktop control settings', () => {
+  it('places external control at the end of the page', async () => {
+    await render();
+    const titles = container.querySelectorAll('[data-openbitfun-part="sectionTitle"]');
+    expect(titles[titles.length - 1]?.textContent).toBe('externalControl.title');
+  });
+
   it('keeps detailed host permissions in the standard compact settings rows', async () => {
     const original = mocks.invoke.getMockImplementation()!;
     mocks.invoke.mockImplementation(async (command: string, ...args: unknown[]) => command === 'computer_use_get_status'

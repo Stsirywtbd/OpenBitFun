@@ -23,7 +23,7 @@ describe('ModelSettingsPage presentation', () => {
     // Template and custom-provider editors share the required API URL row.
     expect(source.match(/<ConfigPageRow label=\{t\('form\.baseUrl'\)\} required/g)).toHaveLength(1);
     expect(source).toContain('const apiKeyRequired = !isOpenCodeZenApiKeyConfig(editingConfig);');
-    expect(source).toContain('<ConfigPageRow label={label} required={apiKeyRequired} align="center" wide>');
+    expect(source).toMatch(/<ConfigPageRow label=\{label\} required=\{apiKeyRequired\} align="center" wide\s+description=/);
     expect(source.match(/required=\{apiKeyRequired\}/g)).toHaveLength(2);
   });
 
@@ -87,5 +87,22 @@ describe('ModelSettingsPage presentation', () => {
     expect(styles).toMatch(
       /@container config-panel \(max-width: 360px\)\s*\{\s*&__cli-account\.openbitfun-config-page-row\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1fr\);[\s\S]*?gap: var\(--openbitfun-space-2\);[\s\S]*?justify-content: flex-start;/,
     );
+  });
+
+  it('lays out fallback channels across the full row width below a standard-measure add picker', () => {
+    const start = source.indexOf('function renderChannelRoutingRows(');
+    const end = source.indexOf('const renderSelectedModelRows = () =>', start);
+    const channelRouting = source.slice(start, end);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(channelRouting).not.toContain('<FieldGroup');
+    expect(channelRouting).not.toContain('account-pool-item');
+    expect(channelRouting).toContain('openbitfun-model-settings__channel-route-row');
+    expect(channelRouting).toContain('<ol className="openbitfun-model-settings__channel-route-list">');
+    expect(styles).toMatch(
+      /&__channel-route-row\.openbitfun-config-page-row\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1fr\) minmax\(0, var\(--openbitfun-overlay-menu-inline-size\)\);/,
+    );
+    expect(styles).toMatch(/&__channel-route-list\s*\{[\s\S]*?grid-column: 1 \/ -1;/);
+    expect(styles).not.toMatch(/&__channel-route-item\s*\{[^}]*flex-wrap:\s*wrap/);
   });
 });

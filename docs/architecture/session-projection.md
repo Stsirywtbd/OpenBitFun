@@ -44,6 +44,60 @@ at delayed delivery time; replacement listeners cannot receive old events.
 A Session restore fences only that Session. Events buffered for other Sessions
 during the read must be flushed, never cleared with the restored projection.
 
+### ACP execution authority
+
+The ACP client on the executing host owns admission, cancellation, agent binding
+and the conversation transcript. A repeated submission with the same Turn ID
+and input returns its existing admission. The host accepts the input before
+contacting the agent. If earlier history is missing, it persists the admission
+and assigns the Turn's storage index after replay, before sending the prompt.
+The host records ordered text, thoughts and tool events in the Session journal.
+On completion it writes the terminal Turn to ordinary conversation history.
+If that write fails, the view receives the recorded outcome and a storage warning.
+The journal retains the Turn for a later save. Closing a view leaves the Turn
+running on the host. A restarted host can recover partial output and report an unknown
+outcome when the agent's terminal response was never recorded.
+
+Views use the existing Session read fence and the optional
+`executionProjection: "acp"` marker to hydrate history and execution state.
+Older hosts keep their persisted-history path. Older frontends can still send
+their checkpoints. The persistence owner protects the runtime-owned range of
+ordinary ACP turns. Legacy turns and other session types keep their existing
+checkpoint rules. Peer views observe the executing host's state. CLI Peer hosts
+continue to report unsupported ACP client operations explicitly.
+
+Switching views and reloading the WebView read the host's live metadata snapshot
+or the saved options. The last confirmed model and conversation are available
+with the agent offline. Opening a session that has never saved agent options
+attaches it once to obtain them, even if the user never opens the model picker.
+Sending or explicitly opening the agent controls can also attach the original
+session. Normal reattachment prefers the agent's advertised resume capability.
+After an unconfirmed stop the host requires load before sending another prompt.
+An agent with neither capability needs a new chat. The old chat keeps its
+original binding and local history. If load is available, a known gap takes
+priority over resume. The runtime registers its receiver before requesting
+load and consumes the history through the response. With complete local
+history it extracts only session metadata. With a known gap it matches
+stable message IDs and unambiguous legacy history. Consecutive user chunks
+without message IDs can represent one prompt or several. The saved prompts
+decide where they split, using the text the agent was sent, which the host
+keeps when it differs from the visible message. A split counts only when
+exactly one placement of the saved prompts explains the replay. Otherwise
+only stable IDs repair that replay. A local unsent turn has no position in
+the agent's history, so an unanchored remote suffix leaves the gap open.
+An unresolvable boundary is remembered together with the local history it
+was tried against, so a later attach skips the full replay until that history
+changes. An incomplete or still growing replay is not remembered. A load
+retires its connection after 60 seconds without an update or 10 minutes
+overall. The next attempt uses the saved binding, and the user's input remains
+available.
+
+An accepted turn whose prompt is not sent yet follows its own Turn ID. A stop,
+a session release or a newer Turn ends it before the prompt reaches the
+agent, including while the agent starts or the saved session loads. Releasing
+a session waits for a load already in progress, so no replay writes history
+after the session is deleted.
+
 ## The problem this replaces
 
 Seven independent writers currently produce a Session's on-screen state:

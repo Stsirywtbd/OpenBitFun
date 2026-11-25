@@ -26,4 +26,15 @@ tool-card 投影，选择 Core Agent Runtime 与具体 SSH 能力；`server` 负
 cargo check -p openbitfun-acp --no-default-features --features client
 cargo check -p openbitfun-acp --no-default-features --features server
 cargo test -p openbitfun-acp
+cargo test -p openbitfun-acp --no-default-features --features client,openbitfun-core/git --lib client::execution::tests
 ```
+
+执行状态测试覆盖请求准入回执、按 Turn 绑定取消和实时事件与重放游标的一致性。
+ACP owner 先记录执行事件，再由宿主发布；执行快照查询不获取长请求持有的协议会话锁。
+Desktop 注入既有的会话事件日志，通过可选的 `executionProjection: "acp"` 恢复字段标明权威来源。
+
+元数据并发验证：
+`cargo test -p openbitfun-acp --no-default-features --features client,openbitfun-core/git --lib client::manager::tests::metadata_`。
+长请求持有协议接收器。切换视图读取宿主的实时快照或已保存的会话选项。显式操作可以重新连接原会话并消费待处理的更新。由唯一的接收器发布模型、命令和配置变化。
+
+使用 `client::manager::recovery_tests` 验证会话历史持久化、冷启动查看和响应前的 ACP 历史回放。宿主先将工作区会话的终态写入正式历史，再发布完成事件并清理日志。

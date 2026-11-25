@@ -194,6 +194,7 @@ export const RemoteConnectDialog: React.FC<RemoteConnectDialogProps> = ({
   const [selectedLanIp, setSelectedLanIp] = useState<string>('');
   const [showDisclaimer, setShowDisclaimer] = useState(false);
   const [hasAgreedDisclaimer, setHasAgreedDisclaimer] = useState<boolean>(() => getRemoteConnectDisclaimerAgreed());
+  const [savingControlPermission, setSavingControlPermission] = useState(false);
   const [botVerboseMode, setBotVerboseMode] = useState<boolean>(false);
 
   const [qrCopied, setQrCopied] = useState(false);
@@ -245,7 +246,7 @@ export const RemoteConnectDialog: React.FC<RemoteConnectDialogProps> = ({
   const connectedNetworkTab = anyNetworkConnection.method;
   const connectedBotTab = botInfoToBotTab(status?.bot_connected);
 
-  const cancelPendingWork = useCallback(async () => {
+  const cancelPendingWork = useCallback(async (hostAlreadyStopping = false) => {
     operationGenerationRef.current += 1;
     const currentStatus = remoteConnectStatusSource.getSnapshot().status;
     const candidateOwner = pendingOwnerRef.current ?? connectionOwnerRef.current;
@@ -253,7 +254,7 @@ export const RemoteConnectDialog: React.FC<RemoteConnectDialogProps> = ({
       ?? (connectionResultRef.current ? remoteNetworkMethod(connectionResultRef.current.method) : null);
     // Closing an invitation preserves an established account route.
     // Disconnect is an explicit action for both Relay endpoints.
-    const owner = (candidateOwner === 'network' && !pendingStartRef.current && selectRemoteNetworkConnection(currentStatus, connectionResultRef.current, ownedMethod ?? undefined).connected)
+    const owner = hostAlreadyStopping || (candidateOwner === 'network' && !pendingStartRef.current && selectRemoteNetworkConnection(currentStatus, connectionResultRef.current, ownedMethod ?? undefined).connected)
       || (candidateOwner === 'bot' && currentStatus?.bot_connected)
       ? null : candidateOwner;
     const pendingStart = pendingStartRef.current;
@@ -329,6 +330,12 @@ export const RemoteConnectDialog: React.FC<RemoteConnectDialogProps> = ({
       void cancelPendingWork();
     };
   }, [cancelPendingWork, isOpen]);
+
+  // Disabling on the CLI can interrupt an invitation while its dialog is open.
+  // The host owns teardown here. An explicit stop would also disable saved bots.
+  useEffect(() => {
+    if (status?.remote_control_allowed === false) void cancelPendingWork(true);
+  }, [cancelPendingWork, status?.remote_control_allowed]);
 
   // ── Polling ──────────────────────────────────────────────────────
 
@@ -474,12 +481,16 @@ export const RemoteConnectDialog: React.FC<RemoteConnectDialogProps> = ({
     const unlisten = api.listen<{ logged_in: boolean; relay_url?: string }>(
       'account://login-state',
       () => {
-        // Invitations belong to the active account route.
+        // Invitations belong to the active account route, so only one issued
+        // before this event can be stale. A start in flight may publish this
+        // very login, and its result is issued for the new account context.
+        const invitationAtEvent = connectionResultRef.current;
         remoteConnectStatusSource.invalidate();
         void remoteConnectStatusSource.refresh().then((nextStatus) => {
           if (!nextStatus) return;
           if (!isOpenRef.current) return;
           applyStatus(nextStatus);
+          if (!invitationAtEvent || connectionResultRef.current !== invitationAtEvent) return;
           const invitationRoute = selectRemoteNetworkConnection(nextStatus, connectionResultRef.current);
           if (!invitationRoute.connected || invitationRoute.relayUrl !== invitationRelayUrl(connectionResultRef.current)) {
             pendingOwnerRef.current = null;
@@ -746,10 +757,9 @@ export const RemoteConnectDialog: React.FC<RemoteConnectDialogProps> = ({
         setError(e?.message || String(e));
       }
     } finally {
-      if (isCurrent()) {
-        if (!ownsConnection) pendingOwnerRef.current = null;
-        setLoading(false);
-      }
+      if (isCurrent() && !ownsConnection) pendingOwnerRef.current = null;
+      // The spinner belongs to this operation even if its owner was released.
+      if (operationGenerationRef.current === operationGeneration) setLoading(false);
     }
   }, [accountLoggedIn, activeView, networkTab, botTab, tgToken, feishuAppId, feishuAppSecret, weixinIlinkToken, weixinBaseUrl, weixinBotAccountId, selectedLanIp, startPolling, hasAgreedDisclaimer]);
 
@@ -1335,6 +1345,19 @@ export const RemoteConnectDialog: React.FC<RemoteConnectDialogProps> = ({
     </button>
   );
 
+  const setRemoteControlAllowed = async (allowed: boolean) => {
+    setSavingControlPermission(true);
+    try {
+      await remoteConnectAPI.setRemoteControlAllowed(allowed);
+      remoteConnectStatusSource.invalidateReads();
+      await remoteConnectStatusSource.refresh();
+    } catch (cause) {
+      notifyError(String(cause), { title: t('remoteConnect.controlSettingFailed') });
+    } finally {
+      setSavingControlPermission(false);
+    }
+  };
+
   const renderOverview = () => (
     <ScrollArea
       className="openbitfun-remote-connect__overview"
@@ -1373,6 +1396,28 @@ export const RemoteConnectDialog: React.FC<RemoteConnectDialogProps> = ({
           })}
         </div>
       </section>
+
+      <div className="openbitfun-remote-connect__setting-row">
+        <div className="openbitfun-remote-connect__setting-copy">
+          <span id="remote-connect-allowed-title" className="openbitfun-remote-connect__setting-title">
+            {t('remoteConnect.controlAllowed')}
+          </span>
+          <span id="remote-connect-allowed-description" className="openbitfun-remote-connect__setting-description">
+            {t('remoteConnect.controlAllowedDescription')}
+          </span>
+        </div>
+        {status?.remote_control_allowed === undefined ? (
+          <span role="status">{t(statusState === 'loading' ? 'remoteConnect.statusChecking' : 'remoteConnect.statusUnavailable')}</span>
+        ) : (
+          <Switch
+            aria-labelledby="remote-connect-allowed-title"
+            aria-describedby="remote-connect-allowed-description"
+            checked={status.remote_control_allowed}
+            disabled={savingControlPermission}
+            onCheckedChange={(allowed) => void setRemoteControlAllowed(allowed)}
+          />
+        )}
+      </div>
 
       {accountLoggedIn && <section
         className="openbitfun-remote-connect__overview-section"
@@ -1643,6 +1688,8 @@ export const RemoteConnectDialog: React.FC<RemoteConnectDialogProps> = ({
               >
                 <AccountPanel />
               </div>
+            ) : status?.remote_control_allowed === false ? (
+              renderNotice(t('remoteConnect.controlDisabledNotice'))
             ) : activeView === 'network' ? (
               <ScrollArea
                 id="remote-connect-panel-network"

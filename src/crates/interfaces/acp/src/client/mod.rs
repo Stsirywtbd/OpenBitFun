@@ -1,6 +1,7 @@
 mod builtin_clients;
 mod config;
 mod dsh_profile;
+mod execution;
 mod manager;
 mod prompt;
 mod remote_capability_store;
@@ -12,12 +13,16 @@ mod session_persistence;
 mod stream;
 mod tool;
 mod tool_card_bridge;
+mod transcript;
 mod transport;
 
 pub use config::{
     AcpClientConfig, AcpClientConfigFile, AcpClientInfo, AcpClientPermissionMode,
     AcpClientRequirementProbe, AcpClientStatus, AcpClientSubagentConfig, AcpRequirementProbeItem,
     RemoteAcpClientRequirementSnapshot,
+};
+pub use execution::{
+    AcpEventCursor, AcpEventProjectionSnapshot, AcpExecutionSnapshot, AcpProjectionJournal,
 };
 pub use manager::{
     AcpClientPermissionResponse, AcpClientService, AcpSessionConfigValue,

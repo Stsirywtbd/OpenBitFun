@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import {
   __test_only__,
   handleDialogTurnComplete,
+  initializeEventListeners,
   handlePromptSuggestion,
   handleSessionHistoryChanged,
   handleSessionStateChanged,
@@ -23,6 +24,9 @@ import type { FlowChatContext } from './types';
 import { markOptimisticDispatchTurnMetadata } from '@/features/dispatch/optimisticDispatchTurn';
 import { interruptedTurnRecoveryGate } from '../interruptedTurnRecoveryGate';
 import { agentAPI } from '@/infrastructure/api/service-api/AgentAPI';
+import { api } from '@/infrastructure/api/service-api/ApiClient';
+import { agenticEventListener } from '../AgenticEventListener';
+import { i18nService } from '@/infrastructure/i18n';
 import { localSessionDriver } from '../../session-drivers/local/LocalSessionDriver';
 import * as peerSessionRefresh from './PeerSessionRefreshModule';
 import { chatInputSessionSubscriptionKey } from '../../utils/chatInputSessionSubscription';
@@ -120,6 +124,202 @@ describe('external BTW turn projection', () => {
     expect(FlowChatStore.getInstance().getState().sessions.get('external-btw')).toMatchObject({
       sessionKind: 'btw', parentSessionId: 'parent', isTransient: true, agentBackedTransient: true,
     });
+  });
+});
+
+describe('remote-driven turn on an unloaded session', () => {
+  beforeEach(() => { resetFlowChatStore(); stateMachineManager.clear(); });
+  afterEach(() => { resetFlowChatStore(); stateMachineManager.clear(); });
+
+  const onAssistantWorkspace = (): FlowChatContext => ({
+    ...createFlowChatContext(),
+    currentWorkspaceId: 'assistant-workspace',
+    currentWorkspacePath: 'C:/Users/u/.openbitfun/personal_assistant/workspace',
+  });
+
+  it('attributes the placeholder to the owning workspace the host reports', () => {
+    __test_only__.handleDialogTurnStarted(onAssistantWorkspace(), {
+      sessionId: 'persisted-session', turnId: 'harmony-turn-1', turnIndex: 20, userInput: 'Continue',
+      workspacePath: 'D:/repo', projectWorkspacePath: 'D:/repo', workspaceId: 'project-workspace',
+    });
+    const session = FlowChatStore.getInstance().getState().sessions.get('persisted-session');
+    expect(session?.workspaceId).toBe('project-workspace');
+    expect(session?.workspacePath).toBe('D:/repo');
+    expect(session?.config.workspaceId).toBe('project-workspace');
+    expect(session?.projectWorkspacePath).toBe('D:/repo');
+    expect(session?.config.projectWorkspacePath).toBe('D:/repo');
+  });
+
+  it('marks a placeholder for a persisted session so it hydrates and never renames it', () => {
+    __test_only__.handleDialogTurnStarted(onAssistantWorkspace(), {
+      sessionId: 'persisted-session', turnId: 'harmony-turn-1', turnIndex: 20, userInput: 'Continue',
+      workspacePath: 'D:/repo', workspaceId: 'project-workspace',
+    });
+    expect(FlowChatStore.getInstance().getState().sessions.get('persisted-session')).toMatchObject({
+      externalPlaceholder: true, isHistorical: true, historyState: 'metadata-only',
+    });
+  });
+
+  it('rebinds an image-analysis placeholder when the turn start names the owning workspace', () => {
+    const context = onAssistantWorkspace();
+    __test_only__.handleImageAnalysisStarted(context, {
+      sessionId: 'persisted-session', imageCount: 1, userInput: 'Look at this',
+    } as any);
+    expect(FlowChatStore.getInstance().getState().sessions.get('persisted-session')?.workspaceId)
+      .toBe('assistant-workspace');
+
+    __test_only__.handleDialogTurnStarted(context, {
+      sessionId: 'persisted-session', turnId: 'harmony-turn-2', turnIndex: 21, userInput: 'Look at this',
+      workspacePath: 'D:/repo', workspaceId: 'project-workspace',
+    });
+    expect(FlowChatStore.getInstance().getState().sessions.get('persisted-session')).toMatchObject({
+      workspaceId: 'project-workspace', workspacePath: 'D:/repo', historyState: 'metadata-only',
+    });
+  });
+
+  it('lets the creation event correct a placeholder projected before it', () => {
+    const context = onAssistantWorkspace();
+    __test_only__.handleImageAnalysisStarted(context, {
+      sessionId: 'new-remote-session', imageCount: 1, userInput: 'Look at this',
+    } as any);
+    __test_only__.handleSessionCreated(context, {
+      sessionId: 'new-remote-session', sessionName: 'New session', agentType: 'Standard',
+      workspacePath: 'D:/repo', workspaceId: 'project-workspace',
+    });
+    expect(FlowChatStore.getInstance().getState().sessions.get('new-remote-session')).toMatchObject({
+      workspaceId: 'project-workspace', workspacePath: 'D:/repo',
+    });
+  });
+
+  it('keeps the current-workspace fallback for an older host without binding facts', () => {
+    __test_only__.handleDialogTurnStarted(onAssistantWorkspace(), {
+      sessionId: 'legacy-session', turnId: 'turn-1', turnIndex: 0, userInput: 'Hello',
+    });
+    const session = FlowChatStore.getInstance().getState().sessions.get('legacy-session');
+    expect(session?.workspaceId).toBe('assistant-workspace');
+  });
+});
+
+describe('ACP turn replay', () => {
+  beforeEach(() => { resetFlowChatStore(); stateMachineManager.clear(); });
+  afterEach(() => { resetFlowChatStore(); stateMachineManager.clear(); });
+
+  it.each([
+    { historyState: 'ready', storageTurnIndex: 5 },
+    { historyState: 'metadata-only', storageTurnIndex: undefined },
+  ] as const)('assigns a recovered storage slot only with ready history ($historyState)', ({ historyState, storageTurnIndex }) => {
+    const store = FlowChatStore.getInstance();
+    store.setState(() => ({
+      sessions: new Map([['session-1', {
+        ...createFinishingSession(),
+        config: { agentType: 'acp:controlled' },
+        historyState,
+        dialogTurns: [{ ...createFinishingTurn(), status: 'completed', storageTurnIndex: 4 }],
+      }]]),
+    }));
+    const start = {
+      sessionId: 'session-1', turnId: 'replayed-turn', turnIndex: null, userInput: 'Continue',
+    };
+    __test_only__.handleDialogTurnStarted(createFlowChatContext(), start);
+    __test_only__.handleDialogTurnStarted(createFlowChatContext(), start);
+
+    const turns = store.getState().sessions.get('session-1')?.dialogTurns;
+    expect(turns).toHaveLength(2);
+    expect(turns?.[1]).toMatchObject({
+      id: 'replayed-turn',
+      storageTurnIndex,
+      backendTurnIndex: undefined,
+    });
+  });
+});
+
+describe('turn finalization', () => {
+  beforeEach(() => { resetFlowChatStore(); stateMachineManager.clear(); });
+  afterEach(() => { resetFlowChatStore(); stateMachineManager.clear(); });
+
+  it('closes text and thinking items whose end chunk never arrived', () => {
+    createSessionWithTurn({
+      ...createFinishingTurn(),
+      modelRounds: [{
+        ...makeRound('round-1'),
+        isStreaming: true,
+        items: [
+          { id: 'thinking-1', type: 'thinking', content: 'Reconsider scope', isStreaming: true,
+            isCollapsed: false, status: 'streaming', timestamp: 1 } as any,
+          { id: 'text-1', type: 'text', content: 'Partial answer', isStreaming: true,
+            status: 'streaming', timestamp: 2 } as any,
+        ],
+      }],
+    });
+
+    __test_only__.finalizeTurnCompletionState(createFlowChatContext(), 'session-1', 'turn-1');
+
+    const items = FlowChatStore.getInstance().getState().sessions.get('session-1')!
+      .dialogTurns[0].modelRounds[0].items as any[];
+    expect(items[0]).toMatchObject({ isStreaming: false, isCollapsed: true, status: 'completed' });
+    expect(items[1]).toMatchObject({ isStreaming: false, status: 'completed' });
+  });
+});
+
+describe('late dialog start events', () => {
+  beforeEach(() => { resetFlowChatStore(); stateMachineManager.clear(); });
+  afterEach(() => { resetFlowChatStore(); stateMachineManager.clear(); });
+
+  it.each(['completed', 'cancelled', 'error'] as const)(
+    'does not restart a turn already projected as %s', status => {
+      createSessionWithTurn({ ...createFinishingTurn(), status });
+      stateMachineManager.getOrCreate('session-1');
+      __test_only__.handleDialogTurnStarted(createFlowChatContext(), {
+        sessionId: 'session-1', turnId: 'turn-1', turnIndex: 0, userInput: 'Delayed start',
+      });
+      expect(stateMachineManager.getCurrentState('session-1')).toBe(SessionExecutionState.IDLE);
+      expect(FlowChatStore.getInstance().getState().sessions.get('session-1')?.dialogTurns[0].status).toBe(status);
+    },
+  );
+
+  it('does not let an older admitted turn take ownership from the current turn', async () => {
+    createSessionWithTurn({ ...createFinishingTurn(), status: 'processing', backendTurnIndex: 1 });
+    FlowChatStore.getInstance().addDialogTurn('session-1', {
+      ...createFinishingTurn(), id: 'turn-2', status: 'processing', backendTurnIndex: 2,
+    });
+    await stateMachineManager.transition('session-1', SessionExecutionEvent.START, {
+      taskId: 'session-1', dialogTurnId: 'turn-2',
+    });
+    __test_only__.handleDialogTurnStarted(createFlowChatContext(), {
+      sessionId: 'session-1', turnId: 'turn-1', turnIndex: 1, userInput: 'Delayed start',
+    });
+    expect(stateMachineManager.get('session-1')?.getContext().currentDialogTurnId).toBe('turn-2');
+  });
+
+  it.each([SessionExecutionState.PROCESSING, SessionExecutionState.FINISHING])(
+    'adopts a newer host-admitted turn over a stale %s turn', async state => {
+      createSessionWithTurn({ ...createFinishingTurn(), status: 'processing', backendTurnIndex: 1 });
+      await stateMachineManager.transition('session-1', SessionExecutionEvent.START, {
+        taskId: 'session-1', dialogTurnId: 'turn-1',
+      });
+      if (state === SessionExecutionState.FINISHING) {
+        await stateMachineManager.transition('session-1', SessionExecutionEvent.BACKEND_STREAM_COMPLETED);
+      }
+      expect(stateMachineManager.getCurrentState('session-1')).toBe(state);
+
+      __test_only__.handleDialogTurnStarted(createFlowChatContext(), {
+        sessionId: 'session-1', turnId: 'turn-2', turnIndex: 2, userInput: 'After the stale turn',
+      });
+
+      expect(stateMachineManager.getCurrentState('session-1')).toBe(SessionExecutionState.PROCESSING);
+      expect(stateMachineManager.get('session-1')?.getContext().currentDialogTurnId).toBe('turn-2');
+    },
+  );
+
+  it('does not adopt a start without a backend index over a tracked turn', async () => {
+    createSessionWithTurn({ ...createFinishingTurn(), status: 'processing', backendTurnIndex: 1 });
+    await stateMachineManager.transition('session-1', SessionExecutionEvent.START, {
+      taskId: 'session-1', dialogTurnId: 'turn-1',
+    });
+    __test_only__.handleDialogTurnStarted(createFlowChatContext(), {
+      sessionId: 'session-1', turnId: 'turn-legacy', userInput: 'Legacy start',
+    });
+    expect(stateMachineManager.get('session-1')?.getContext().currentDialogTurnId).toBe('turn-1');
   });
 });
 
@@ -1458,11 +1658,12 @@ describe('handleDialogTurnFailed', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     resetFlowChatStore();
     stateMachineManager.clear();
   });
 
-  it('keeps a zero-round turn and records the terminal provider error', () => {
+  it.each([undefined, 'disk full'])('keeps the provider failure when the history save error is %s', async (saveError) => {
     createSessionWithTurn({
       id: 'turn-1',
       sessionId: 'session-1',
@@ -1478,15 +1679,21 @@ describe('handleDialogTurnFailed', () => {
     const context = createFlowChatContext();
     context.userCancelledSessionIds.add('session-1');
 
-    __test_only__.handleDialogTurnFailed(context, {
+    vi.spyOn(api, 'listen').mockImplementation(() => () => {});
+    vi.spyOn(api, 'waitForListenerRegistrations').mockResolvedValue();
+    const translate = vi.spyOn(i18nService, 't');
+    const cleanup = await initializeEventListeners(context, vi.fn());
+    agenticEventListener.dispatchExternal('agentic://dialog-turn-failed', {
       sessionId: 'session-1',
       turnId: 'turn-1',
       error: 'OpenAI Streaming API failed after 10 attempts: connection refused',
+      acpHistorySaveError: saveError,
       errorDetail: {
         category: 'network',
         provider: 'openai',
       },
     });
+    cleanup();
 
     const turn = FlowChatStore.getInstance()
       .getState()
@@ -1503,7 +1710,12 @@ describe('handleDialogTurnFailed', () => {
       modelRounds: [],
     });
     expect(notificationService.error).not.toHaveBeenCalled();
-    expect(notificationService.warning).not.toHaveBeenCalled();
+    if (saveError) {
+      expect(translate).toHaveBeenCalledWith('flow-chat:historyState.turnSaveFailed', { error: saveError });
+      expect(notificationService.warning).toHaveBeenCalledOnce();
+    } else {
+      expect(notificationService.warning).not.toHaveBeenCalled();
+    }
     expect(context.userCancelledSessionIds.has('session-1')).toBe(false);
   });
 });

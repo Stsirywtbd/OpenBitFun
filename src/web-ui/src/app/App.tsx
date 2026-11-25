@@ -421,6 +421,14 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [verifyMainWindowVisible]);
 
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    const subscription = import('@/infrastructure/api/adapters/figureInspectionBridge')
+      .then(bridge => bridge.listenForFigureChecks())
+      .catch(error => { log.error('Failed to attach the figure renderer', error); });
+    return () => { void subscription.then(off => off?.()); };
+  }, []);
+
   // Register presentation routing as soon as the product surface is usable.
   // Native discovery, readback, and settings mutations are installed during
   // Desktop setup; only UI navigation/product actions require this handshake.
@@ -770,6 +778,25 @@ function App() {
       disposed = true;
       unsubscribe?.();
     };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    const subscription = import('@/infrastructure/api/service-api/DesktopExternalControlAPI')
+      .then(({ listenForControllerSessionOpen }) => listenForControllerSessionOpen(async (sessionId, workspaceId) => {
+        if (disposed) return;
+        try {
+          const { openAgentCompanionSession } = await import('./services/openAgentCompanionSession');
+          if (!disposed && !await openAgentCompanionSession(sessionId, 'local', workspaceId)) {
+            log.warn('External controller session could not be opened', { sessionId });
+          }
+        } catch (error) {
+          log.warn('Failed to navigate to external controller session', { sessionId, error });
+        }
+      }))
+      .catch(error => { log.warn('Failed to subscribe to external controller navigation', { error }); });
+    return () => { disposed = true; void subscription.then(remove => remove?.()); };
   }, []);
 
   useEffect(() => {

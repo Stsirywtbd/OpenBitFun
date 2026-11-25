@@ -13,6 +13,7 @@ import { i18nService } from '@/infrastructure/i18n';
 import { activateSurface } from '@/infrastructure/peer-device/deviceSurface';
 import { notificationService } from '@/shared/notification-system';
 import ModelSettingsPage from './ModelSettingsPage';
+import * as magpieService from '@/infrastructure/api/service-api/MagpieAPI';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -131,6 +132,167 @@ describe('ModelSettingsPage loading and provider actions', () => {
     await act(async () => container.querySelector<HTMLButtonElement>(`[data-config-id="${model.id}"] button[aria-label="${copy('actions.test')}"]`)!.click());
   };
   const connectionBadge = () => container.querySelector<HTMLElement>(`[data-testid="settings-model-test-status"][data-config-id="${model.id}"]`);
+
+  it.each([false, true])('discovers and saves Magpie models without replacing existing providers (remote gateway: %s)', async remote => {
+    vi.spyOn(magpieService, 'supportsMagpieDiscovery').mockReturnValue(true);
+    const discover = vi.spyOn(magpieService.magpieAPI, 'probe').mockImplementation(async base => ({
+      status: 'ready', base_url: base, models: [{ id: 'provider/model-with-tools', display_name: 'Gateway model', tool_call: true }],
+    }));
+    const inference = vi.spyOn(aiApi, 'testAIConfigConnection');
+    const update = vi.spyOn(configManager, 'updateConfig').mockImplementation(
+      async <T,>(_path: string, transform: (current: T) => T) => transform([model] as T),
+    );
+    await act(async () => root.render(<ModelSettingsPage />));
+    const connect = () => container.querySelector<HTMLButtonElement>('[data-testid="settings-model-connect-magpie-btn"]')!;
+    expect(connect().disabled).toBe(true);
+    await act(async () => { reads.get('ai.models')!.resolve([model]); reads.get('ai.default_models')!.resolve({}); });
+    await act(async () => connect().click());
+    const panel = () => container.querySelector<HTMLElement>('[data-testid="settings-magpie-panel"]')!;
+    const baseInput = panel().querySelector<HTMLInputElement>('[data-testid="settings-magpie-address"]')!;
+    const keyInput = panel().querySelector<HTMLInputElement>('input[type="password"]')!;
+    expect(baseInput.value).toBe('http://127.0.0.1:3425/v1');
+    expect(keyInput.value).toBe('magpie-openbitfun');
+    if (remote) {
+      await inputValue(baseInput, 'https://magpie.example.test/v1');
+      await inputValue(keyInput, 'fixture-gateway-key');
+      await act(async () => panel().querySelector<HTMLButtonElement>('[data-testid="settings-magpie-detect"]')!.click());
+    }
+    const base = remote ? 'https://magpie.example.test/v1' : 'http://127.0.0.1:3425/v1';
+    const key = remote ? 'fixture-gateway-key' : 'magpie-openbitfun';
+    expect(discover).toHaveBeenLastCalledWith(base, key);
+    await act(async () => panel().querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
+    await act(async () => panel().querySelector<HTMLButtonElement>('[data-testid="settings-magpie-import"]')!.click());
+    expect(update).toHaveBeenCalledWith('ai.models', expect.any(Function), { expectedValue: [model] });
+    const saved = update.mock.calls.find(([path]) => path === 'ai.models')![1]([model]) as AIModelConfig[];
+    expect(saved).toHaveLength(2);
+    expect(saved[0]).toEqual(model);
+    expect(saved[1]).toMatchObject({ name: 'Magpie', model_name: 'provider/model-with-tools',
+      base_url: base, api_key: key, provider: 'openai', capabilities: ['text_chat', 'function_calling'] });
+    expect(inference).not.toHaveBeenCalled();
+    expect(panel().querySelector<HTMLInputElement>('input[type="checkbox"]')!.disabled).toBe(true);
+    expect(panel().querySelector<HTMLButtonElement>('[data-testid="settings-magpie-remove-model"]')?.dataset.modelId)
+      .toBe('provider/model-with-tools');
+  });
+
+  it.each(['empty', 'unreachable', 'access_denied', 'unrecognized', 'catalog_error'] as const)(
+    'shows %s without importing or testing models', async status => {
+      vi.spyOn(magpieService, 'supportsMagpieDiscovery').mockReturnValue(true);
+      vi.spyOn(magpieService.magpieAPI, 'probe').mockResolvedValue({ status, base_url: 'http://127.0.0.1:3425/v1', models: [] });
+      const inference = vi.spyOn(aiApi, 'testAIConfigConnection');
+      const update = vi.spyOn(configManager, 'updateConfig');
+      await loadModelPool();
+      await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="settings-model-connect-magpie-btn"]')!.click());
+      expect(container.querySelector<HTMLButtonElement>('[data-testid="settings-magpie-import"]')!.disabled).toBe(true);
+      expect(container.querySelector('[data-testid="settings-magpie-panel"] [role="status"]')?.textContent).toBeTruthy();
+      expect(update).not.toHaveBeenCalled();
+      expect(inference).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the catalog, search, selection and scroll position while refreshing', async () => {
+    vi.spyOn(magpieService, 'supportsMagpieDiscovery').mockReturnValue(true);
+    const catalog: magpieService.MagpieProbeResult = { status: 'ready',
+      base_url: 'http://127.0.0.1:3425/v1', models: [{ id: 'group/work', display_name: 'Work model' }] };
+    const probe = vi.spyOn(magpieService.magpieAPI, 'probe').mockResolvedValue(catalog);
+    await loadModelPool();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="settings-model-connect-magpie-btn"]')!.click());
+    const panel = container.querySelector<HTMLElement>('[data-testid="settings-magpie-panel"]')!;
+    const list = panel.querySelector<HTMLElement>('[data-openbitfun-part="magpieCatalog"]')!;
+    const search = panel.querySelector<HTMLInputElement>('input[type="search"]')!;
+    const checkbox = panel.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    const refresh = panel.querySelector<HTMLButtonElement>('[data-testid="settings-magpie-detect"]')!;
+    const save = panel.querySelector<HTMLButtonElement>('[data-testid="settings-magpie-import"]')!;
+    const status = panel.querySelector('[role="status"]')!;
+    const previousStatus = status.textContent;
+    await inputValue(search, 'Work');
+    await act(async () => checkbox.click());
+    list.scrollTop = 80;
+    const pending = deferred();
+    probe.mockReturnValueOnce(pending.promise as ReturnType<typeof magpieService.magpieAPI.probe>);
+    await act(async () => refresh.click());
+    expect(list.isConnected).toBe(true);
+    expect(search.isConnected).toBe(true);
+    expect(checkbox.isConnected).toBe(true);
+    expect(search.value).toBe('Work');
+    expect(checkbox.checked).toBe(true);
+    expect(list.scrollTop).toBe(80);
+    expect(status.textContent).toBe(previousStatus);
+    expect(list.getAttribute('aria-busy')).toBe('true');
+    expect(refresh.textContent).toBe(copy('magpie.refresh'));
+    expect(refresh.disabled).toBe(true);
+    expect(save.disabled).toBe(true);
+    await act(async () => pending.resolve(catalog));
+    expect(panel.querySelector('[data-openbitfun-part="magpieCatalog"]')).toBe(list);
+    expect(panel.querySelector('input[type="checkbox"]')).toBe(checkbox);
+    expect(checkbox.checked).toBe(true);
+    expect(search.value).toBe('Work');
+    expect(list.scrollTop).toBe(80);
+    expect(list.getAttribute('aria-busy')).toBe('false');
+    expect(save.disabled).toBe(false);
+
+    probe.mockRejectedValueOnce(new Error('peer disconnected'));
+    await act(async () => refresh.click());
+    expect(list.isConnected).toBe(true);
+    expect(status.textContent).toBe(copy('magpie.states.failed'));
+    expect(save.disabled).toBe(true);
+    await act(async () => refresh.click());
+    expect(status.textContent).toBe(copy('magpie.states.ready'));
+    expect(save.disabled).toBe(false);
+
+    probe.mockResolvedValueOnce({ ...catalog, status: 'unreachable', models: [] });
+    await act(async () => refresh.click());
+    expect(status.textContent).toBe(copy('magpie.states.unreachable'));
+    expect(panel.querySelector('input[type="checkbox"]')).toBeNull();
+    expect(save.disabled).toBe(true);
+  });
+
+  it('keeps a collapsed selection dirty and blocks unsupported-host detection', async () => {
+    const supported = vi.spyOn(magpieService, 'supportsMagpieDiscovery').mockReturnValue(false);
+    const probe = vi.spyOn(magpieService.magpieAPI, 'probe').mockResolvedValue({ status: 'ready', base_url: 'http://127.0.0.1:3425/v1', models: [{ id: 'group/work' }] });
+    await loadModelPool();
+    const connect = () => container.querySelector<HTMLButtonElement>('[data-testid="settings-model-connect-magpie-btn"]')!;
+    await act(async () => connect().click());
+    expect(probe).not.toHaveBeenCalled();
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="settings-magpie-detect"]')!.disabled).toBe(true);
+    await act(async () => connect().click());
+    supported.mockReturnValue(true);
+    await act(async () => root.render(<ModelSettingsPage />));
+    await act(async () => connect().click());
+    await act(async () => container.querySelector<HTMLInputElement>('[data-testid="settings-magpie-panel"] input[type="checkbox"]')!.click());
+    await act(async () => connect().click());
+    expect(getSettingsDraftSnapshot().resources.find(item => item.id === 'magpie-source')?.dirty).toBe(true);
+    await act(async () => connect().click());
+    expect(container.querySelector<HTMLInputElement>('[data-testid="settings-magpie-panel"] input[type="checkbox"]')!.checked).toBe(true);
+  });
+
+  it('retains the opened configuration snapshot when other model settings change', async () => {
+    vi.spyOn(magpieService, 'supportsMagpieDiscovery').mockReturnValue(true);
+    vi.spyOn(magpieService.magpieAPI, 'probe').mockResolvedValue({ status: 'ready', base_url: 'http://127.0.0.1:3425/v1', models: [{ id: 'group/work' }] });
+    const emit = captureConfigEvents();
+    const update = vi.spyOn(configManager, 'updateConfig').mockRejectedValue(new ConfigConflictError());
+    await loadModelPool();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="settings-model-connect-magpie-btn"]')!.click());
+    await act(async () => container.querySelector<HTMLInputElement>('[data-testid="settings-magpie-panel"] input[type="checkbox"]')!.click());
+    const changed = { ...model, api_key: 'externally-updated' };
+    reads.set('ai.models', deferred()); reads.get('ai.models')!.resolve([changed]);
+    await act(async () => emit('ai.models'));
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="settings-magpie-import"]')!.click());
+    expect(update).toHaveBeenCalledWith('ai.models', expect.any(Function), { expectedValue: [model] });
+    expect(getSettingsDraftSnapshot().resources.find(item => item.id === 'magpie-source')?.dirty).toBe(true);
+  });
+
+  it('discards a pending Magpie catalog when the active device changes', async () => {
+    const pending = deferred();
+    vi.spyOn(magpieService, 'supportsMagpieDiscovery').mockReturnValue(true);
+    vi.spyOn(magpieService.magpieAPI, 'probe').mockReturnValue(pending.promise as ReturnType<typeof magpieService.magpieAPI.probe>);
+    await act(async () => root.render(<ModelSettingsPage />));
+    await act(async () => { reads.get('ai.models')!.resolve([]); reads.get('ai.default_models')!.resolve({}); });
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="settings-model-connect-magpie-btn"]')!.click());
+    await act(async () => activateSurface('peer-magpie'));
+    await act(async () => pending.resolve({ status: 'ready', base_url: 'http://127.0.0.1:3425/v1', models: [{ id: 'old-host/private-model' }] }));
+    expect(document.body.textContent).not.toContain('old-host/private-model');
+    expect(document.querySelector('[data-testid="settings-magpie-panel"]')).toBeNull();
+  });
 
   it.each([
     'ai.model_routing', 'ai.model_routing.protocol', 'ai.model_routing.timeout_ms', 'ai.model_routing.router_model_id',
@@ -344,6 +506,26 @@ describe('ModelSettingsPage loading and provider actions', () => {
     expect(update).not.toHaveBeenCalled();
   });
 
+  it.each(['api_key', 'subscription'] as const)('exposes Responses preferences for %s without exposing subscription header overrides', async authType => {
+    const configured: AIModelConfig = { ...model, provider: 'responses',
+      auth: authType === 'subscription' ? { type: 'subscription', provider: 'codex' } : { type: 'api_key' } };
+    await act(async () => root.render(<ModelSettingsPage />));
+    await act(async () => {
+      reads.get('ai.models')!.resolve([configured]);
+      reads.get('ai.default_models')!.resolve({});
+    });
+    await act(async () => container.querySelector<HTMLButtonElement>('.openbitfun-model-settings__source-pill')!.click());
+    await act(async () => editor()!.querySelector<HTMLButtonElement>('[data-testid="settings-model-advanced-toggle"] button')!.click());
+    const transport = editor()!.querySelector<HTMLButtonElement>(`[role="combobox"][aria-label="${copy('advancedSettings.responses.transportLabel')}"]`)!;
+    expect(transport.textContent).toContain('HTTP');
+    expect(transport.disabled).toBe(false);
+    await act(async () => transport.click());
+    await act(async () => [...document.body.querySelectorAll<HTMLElement>('[role="option"]')]
+      .find(option => option.textContent === 'WebSocket')!.click());
+    expect(editorDraft().dirty).toBe(true);
+    expect(editor()!.querySelector('.openbitfun-model-settings__custom-request-body-row') === null).toBe(authType === 'subscription');
+  });
+
   it('returns an existing provider editor to the model overview', async () => {
     await act(async () => root.render(<ModelSettingsPage />));
     await act(async () => {
@@ -398,6 +580,8 @@ describe('ModelSettingsPage loading and provider actions', () => {
     await inputValue(manualName, 'custom-model');
     await act(async () => manualName.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
     await act(async () => editor()!.querySelector<HTMLButtonElement>('[data-testid="settings-model-capsule-edit"]')!.click());
+    const contextWindow = editor()!.querySelector<HTMLInputElement>(`input[aria-label="${copy('form.contextWindow')}"]`)!;
+    expect(contextWindow.value).toBe(i18nService.formatNumber(200_000, { useGrouping: true }));
     await inputValue(editor()!.querySelector<HTMLInputElement>('[data-testid="settings-model-name-input"]')!, 'renamed-model');
     const save = editor()!.querySelector<HTMLButtonElement>('[data-testid="settings-model-save-btn"]')!;
     expect(save.textContent).toBe(copy('actions.save'));
@@ -524,6 +708,52 @@ describe('ModelSettingsPage loading and provider actions', () => {
     expect(configuredProvider.textContent).not.toContain('unused@example.invalid');
     expect(summary.querySelector('[data-account-id="codex:second-slot"]')?.textContent).toContain('unused@example.invalid');
     expect(summary.querySelector(`button[aria-label="${copy('actions.deleteProvider')}: ${model.name}"]`)).not.toBeNull();
+  });
+
+  it('counts both ZCode regions as one service and labels a signed-out slot instead of repeating the account', async () => {
+    const zcode = { provider: 'zcode' as const, connected: true, account: 'lppdgqoa@example.invalid',
+      display_label: 'ZCode', suggested_format: 'anthropic', suggested_base_url: 'https://example.test/v1',
+      suggested_model: 'fixture-model', api_offerings: [] };
+    const zcodeCn = { ...zcode, provider: 'zcode_cn' as const };
+    const namedSlot = 'zcode-account-3f2a1b9c-0000-4000-8000-000000000000';
+    vi.mocked(aiApi.listSubscriptionAccounts).mockResolvedValue([zcode, zcodeCn]);
+    // One signed-in account in the default slot plus a second slot of the same
+    // ZCode identity that is no longer signed in.
+    vi.spyOn(aiApi, 'listSubscriptionAccountInstances').mockResolvedValue([
+      { account_id: 'zcode', is_default: true, account: zcode, enabled: true },
+      { account_id: 'zcode_cn', is_default: true, account: zcodeCn, enabled: true },
+      { account_id: namedSlot, is_default: false, account: { ...zcode, connected: false }, enabled: true },
+    ]);
+    vi.spyOn(aiApi, 'getSubscriptionAccountQuota').mockImplementation(() => new Promise(() => {}));
+    const configured: AIModelConfig[] = [
+      { ...model, id: 'zcode-model', auth: { type: 'subscription', provider: 'zcode' } },
+      { ...model, id: 'zcode-cn-model', auth: { type: 'subscription', provider: 'zcode_cn' } },
+      { ...model, id: 'zcode-slot-model', auth: { type: 'subscription', provider: 'zcode', account_id: namedSlot } },
+    ];
+    const values: Record<string, unknown> = {
+      'ai.models': configured, 'ai.default_models': { primary: model.id },
+      'ai.proxy': { enabled: false, url: '', username: '', password: '' },
+      'ai.stream_idle_timeout_secs': 120, 'ai.stream_ttft_timeout_secs': 60,
+    };
+    vi.spyOn(configManager, 'hasCachedConfig').mockImplementation(path => path in values);
+    vi.spyOn(configManager, 'getCachedConfig').mockImplementation(<T,>(path: string) => values[path] as T);
+    await act(async () => root.render(<ModelSettingsPage />));
+    const summary = container.querySelector('[data-testid="settings-subscription-services"]')!;
+    const labels = [...summary.querySelectorAll<HTMLButtonElement>('.openbitfun-model-settings__source-pill')]
+      .map(capsule => capsule.textContent);
+    expect(labels).toHaveLength(3);
+    expect(labels[0]).toContain(copy('subscriptionAuth.regions.zai'));
+    expect(labels[1]).toContain(copy('subscriptionAuth.regions.bigmodel'));
+    // The third capsule is the same ZCode account in another slot: it has to
+    // state the slot and that it is signed out, or it reads as a duplicate.
+    expect(labels[2]).toContain(namedSlot.slice(-8));
+    expect(labels[2]).toContain(copy('subscriptionAuth.notSignedIn'));
+    expect(labels[2]).not.toBe(labels[0]);
+    // Both regions and both slots belong to one imported service.
+    const imported = String(i18nService.getI18nInstance().t('acquisition.importedSummary', {
+      ns: 'settings/models', providers: '1', models: '3',
+    }));
+    expect(summary.closest('.openbitfun-config-page-row')?.textContent).toContain(imported);
   });
 
   it('filters the account browser by product, retains ZCode regions, and resets on device activation', async () => {
@@ -731,7 +961,7 @@ describe('ModelSettingsPage loading and provider actions', () => {
     const account = { provider: 'codex' as const, connected: true, account: 'private@example.invalid',
       display_label: 'Codex', suggested_format: 'openai', suggested_base_url: 'https://example.test/v1',
       suggested_model: 'fixture-model', api_offerings: [] };
-    const catalog = [account, ...(['zcode', 'zcode_cn', 'workbuddy'] as const).map(provider => ({ ...account, provider }))];
+    const catalog = [account, ...(['zcode', 'zcode_cn', 'antigravity', 'workbuddy'] as const).map(provider => ({ ...account, provider }))];
     const catalogRead = deferred();
     const list = vi.mocked(aiApi.listSubscriptionAccounts).mockImplementation(() => catalogRead.promise as never);
     vi.spyOn(aiApi, 'listSubscriptionAccountInstances').mockResolvedValue([]);
@@ -758,6 +988,7 @@ describe('ModelSettingsPage loading and provider actions', () => {
     expect(dialog().querySelector('input[type="radio"], [role="radiogroup"]')).toBeNull();
     expect(login('codex').disabled).toBe(false);
     expect(login('zcode').disabled).toBe(false);
+    expect(dialog().querySelector('[data-provider="antigravity"]')).toBeNull();
     expect(dialog().textContent).not.toContain(account.account);
     expect(dialog().textContent).not.toContain(copy('subscriptionAuth.products.workbuddy'));
     expect(dialog().querySelector('[data-openbitfun-part="subscriptionAccounts"]')).toBeNull();
@@ -810,8 +1041,12 @@ describe('ModelSettingsPage loading and provider actions', () => {
     const dialog = document.querySelector<HTMLElement>('.openbitfun-model-settings__subscription-dialog')!;
     const action = (key: string) => [...dialog.querySelectorAll<HTMLButtonElement>('button')]
       .find(element => element.textContent === copy(key))!;
+    const reads = vi.mocked(aiApi.listSubscriptionAccounts).mock.calls.length;
     await act(async () => action('subscriptionAuth.login').click());
     expect(dialog.querySelector('[role="alert"]')?.textContent).toContain('Authorization unavailable');
+    // A refused attempt still has to show what the host holds, so a stale
+    // placeholder slot can never sit beside a signed-in account.
+    expect(vi.mocked(aiApi.listSubscriptionAccounts).mock.calls.length).toBeGreaterThan(reads);
     await act(async () => action('subscriptionAuth.retryLogin').click());
     expect(start).toHaveBeenCalledTimes(2);
     expect(start.mock.calls[0][1]).not.toBe('hermes');

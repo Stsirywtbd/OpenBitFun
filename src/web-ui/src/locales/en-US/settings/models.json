@@ -49,7 +49,7 @@
   },
   "subscriptionAuth": {
     "sectionTitle": "Subscription accounts",
-    "sectionDescription": "Connect Codex, Antigravity, OpenCode, xAI, Hermes, or ZCode subscriptions",
+    "sectionDescription": "Connect Codex, OpenCode, xAI, Hermes, or ZCode subscriptions",
     "rescan": "Refresh status",
     "import": "Use as model",
     "login": "Sign in",
@@ -66,7 +66,7 @@
     "refreshFailed": "Refresh failed: {{error}}",
     "loginSuccess": "Signed in",
     "loginFailed": "Sign-in failed: {{error}}",
-    "peerLoginRequiresLocalDevice": "Antigravity sign-in must be completed on the device running OpenBitFun. Switch to that device and sign in there.",
+    "peerLoginRequiresLocalDevice": "Antigravity subscription sign-in is no longer supported. Existing configurations are preserved.",
     "logoutSuccess": "Signed out",
     "logoutCleanupPending": "Signed out. Credential cleanup is pending and will retry automatically.",
     "logoutFailed": "Sign-out failed: {{error}}",
@@ -82,7 +82,7 @@
     "chooseRegionHint": "Select the platform where you have a Coding Plan subscription.",
     "products": {
       "codex": "Codex",
-      "antigravity": "Antigravity",
+      "antigravity": "Antigravity (removed)",
       "opencode": "OpenCode",
       "grok": "Grok",
       "hermes": "Hermes",
@@ -92,7 +92,7 @@
     },
     "details": {
       "codex": "ChatGPT",
-      "antigravity": "Google",
+      "antigravity": "Removed · subscription import is no longer supported",
       "opencode": "Zen",
       "grok": "SuperGrok",
       "hermes": "Nous Portal",
@@ -112,7 +112,7 @@
       "opencode": "OpenCode",
       "apiKey": "API Key",
       "codex": "Codex",
-      "antigravity": "Antigravity",
+      "antigravity": "Antigravity (removed)",
       "grok": "Grok",
       "hermes": "Hermes",
       "workbuddy": "WorkBuddy (removed)",
@@ -147,8 +147,13 @@
     "logoutNoAffectedModels": "No model configuration currently uses this subscription account.",
     "logoutConsequence": "Model configurations will not be deleted. Sign in to the same subscription account again to resume using them.",
     "confirmLogout": "Sign out",
+    "forget": "Remove account",
+    "forgetConfirmTitle": "Remove this signed-out account?",
+    "forgetConsequence": "This account is not signed in, so removing it only deletes the retained identity and its row. Model configurations stay, and signing in again recreates the account.",
+    "confirmForget": "Remove account",
+    "forgetSuccess": "Subscription account removed",
     "openCodeRemoved": "OpenCode Console OAuth supports Zen only. Select API key and enter a Go key. Your existing model configuration is preserved.",
-    "retiredProvider": "WorkBuddy subscriptions were removed because the vendor no longer allows subscription access. Your configuration and credentials are preserved; create an API key provider to keep using these models.",
+    "retiredProvider": "This subscription provider was removed because subscription access is no longer supported. Your configuration and credentials are preserved; create an API key provider to keep using these models.",
     "editorDescription": "Models from this service share the signed-in subscription account",
     "accountLabel": "Account",
     "accountAuthentication": "Subscription account",
@@ -237,7 +242,55 @@
     "urlHint": "Official API URL pre-filled, modify if using proxy or private deployment",
     "formatHint": "Automatically selected based on provider, usually no need to change"
   },
+  "magpie": {
+    "description": "Connect to Magpie and add models.",
+    "connect": "Detect Magpie",
+    "keyHint": "Keep the default for local connections. Use a Magpie key for remote or Docker connections.",
+    "manage": "Manage models",
+    "addConnection": "Another gateway",
+    "address": "Gateway address",
+    "key": "Gateway key",
+    "detect": "Detect",
+    "refresh": "Refresh models",
+    "manual": "Configure manually",
+    "hostHint": "localhost refers to the connected remote device.",
+    "search": "Search Magpie models",
+    "imported": "Added",
+    "routingGroup": "Magpie routing group",
+    "missing": "Unavailable",
+    "missingHint": "These models are missing from Magpie. Your saved settings are kept.",
+    "poolHint": "Added models can be set as defaults or included in model pools.",
+    "importSelected": "Add {{count}} models",
+    "saveConnection": "Save connection",
+    "close": "Collapse",
+    "states": {
+      "idle": "Not checked",
+      "checking": "Connecting…",
+      "ready": "Magpie detected",
+      "empty": "Magpie detected, but no models yet. Enable models in Magpie, then refresh.",
+      "unreachable": "Magpie not detected. Make sure it is running.",
+      "accessDenied": "Access denied. Check the key and Magpie sharing settings.",
+      "unrecognized": "This address is not a Magpie service.",
+      "catalogError": "Magpie detected, but the model list failed to load. Try again.",
+      "invalidAddress": "Enter an http:// or https:// address without credentials or query parameters.",
+      "unsupported": "Detection is unavailable on this device. Update OpenBitFun or configure manually.",
+      "failed": "The operation failed. Reopen model settings and try again.",
+      "saved": "Saved."
+    },
+    "contextTooSmall": "Requires at least 32,000 context tokens",
+    "invalidLimits": "Unsupported model limits",
+    "discard": "Cancel"
+  },
   "providers": {
+    "magpie": {
+      "name": "Magpie",
+      "description": "Models and routing groups from your Magpie gateway",
+      "urlOptions": {
+        "openai": "Magpie gateway",
+        "responses": "Magpie gateway",
+        "anthropic": "Magpie gateway"
+      }
+    },
     "opencode-zen": {
       "name": "OpenCode Zen",
       "description": "OpenCode models with free access and pay-as-you-go API keys."
@@ -735,13 +788,23 @@
       "validJson": "JSON format is valid",
       "mergeHint": "Custom fields will override corresponding fields in the default request body"
     },
-    "description": "Adapt requests and responses to service-specific requirements; keep the defaults if unsure"
+    "description": "Adapt requests and responses to service-specific requirements; keep the defaults if unsure",
+    "responses": {
+      "transportLabel": "Responses transport",
+      "transportHint": "Applies to Responses requests. Models can override provider defaults. WebSocket errors are reported without switching to HTTP.",
+      "contextLabel": "Context sending",
+      "contextHint": "HTTP sends full context. WebSocket incremental mode reuses a completed response and sends full context when recovery is required. Response storage stays disabled.",
+      "full": "Full context",
+      "incremental": "Incremental context",
+      "unsupported": "This host does not support Responses WebSocket settings. Update the host to configure them.",
+      "reset": "Use provider settings"
+    }
   },
   "providersDescription": "Manage endpoints, authentication, and the models sharing each connection",
   "editSettingsTitle": "Model parameters",
   "editProviderSettingsTitle": "Service connection",
   "sections": {
-    "acquisition": "Add or import models",
+    "acquisition": "Model sources",
     "selectionModes": "Smart mode",
     "pool": "All models",
     "more": "More settings"
@@ -984,5 +1047,15 @@
     "noCandidates": "No eligible backup models",
     "mode": "Routing",
     "modeHint": "Automatic switching tries the backups in order after a failure; a fixed choice only uses that channel and never switches."
+  },
+  "btwModel": {
+    "title": "Side questions",
+    "label": "Default model",
+    "inherit": "Inherit parent session",
+    "pool": "Model pool: {{name}}",
+    "unavailable": "Saved selection is unavailable — choose another model or inherit",
+    "unsupported": "This host does not support side-question model defaults.",
+    "failed": "Could not load or save the side-question model setting. Your saved choice is retained.",
+    "retry": "Retry"
   }
 }

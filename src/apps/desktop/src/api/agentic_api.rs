@@ -621,6 +621,9 @@ pub struct RestoreSessionWithTurnsResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreSessionViewResponse {
+    /// Additive capability/authority marker. Older hosts omit it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_projection: Option<&'static str>,
     pub session: SessionResponse,
     pub turns: Vec<DialogTurnData>,
     pub interaction_snapshot: SessionInteractionSnapshot,
@@ -672,6 +675,16 @@ fn frontend_event_projection_snapshot(
                 payload: event.payload,
             })
             .collect(),
+    }
+}
+
+fn enrich_acp_replay_event(name: &str, payload: &mut serde_json::Value) {
+    // ACP does not provide an absolute persisted Turn ordinal. Preserve the
+    // established live-wire absence rather than inventing ordinal zero.
+    if name == "agentic://dialog-turn-started" {
+        payload["turnIndex"] = serde_json::Value::Null;
+    } else if name == "agentic://model-round-started" {
+        payload["renderHints"] = serde_json::json!({"disableExploreGrouping":true});
     }
 }
 
@@ -1593,6 +1606,21 @@ pub async fn create_session(
     coordinator: State<'_, Arc<ConversationCoordinator>>,
     app_state: State<'_, AppState>,
     runtime: State<'_, DesktopRuntimeContext>,
+    request: CreateSessionRequest,
+) -> Result<CreateSessionResponse, String> {
+    create_desktop_session(
+        coordinator.inner(),
+        app_state.inner(),
+        runtime.inner(),
+        request,
+    )
+    .await
+}
+
+pub(crate) async fn create_desktop_session(
+    coordinator: &ConversationCoordinator,
+    app_state: &AppState,
+    runtime: &DesktopRuntimeContext,
     mut request: CreateSessionRequest,
 ) -> Result<CreateSessionResponse, String> {
     fn norm_conn(s: Option<String>) -> Option<String> {
@@ -1850,7 +1878,7 @@ pub async fn create_session(
             .as_deref()
             .ok_or_else(|| "Idempotent worktree session requires a session ID".to_string())?;
         let effective_path = desktop_session_storage_root(
-            &coordinator,
+            coordinator,
             project_workspace_id.as_deref(),
             Some(&project_workspace_path),
             remote_conn.as_deref(),
@@ -1885,7 +1913,7 @@ pub async fn create_session(
             .as_deref()
             .ok_or_else(|| "Idempotent Review session requires a session ID".to_string())?;
         let effective_path = desktop_session_storage_root(
-            &coordinator,
+            coordinator,
             project_workspace_id.as_deref(),
             Some(&project_workspace_path),
             remote_conn.as_deref(),
@@ -2666,7 +2694,7 @@ fn desktop_dialog_turn_request(
     })
 }
 
-fn desktop_user_message_metadata(
+pub(super) fn desktop_user_message_metadata(
     metadata: Option<serde_json::Value>,
 ) -> serde_json::Map<String, serde_json::Value> {
     match metadata {
@@ -3822,9 +3850,17 @@ pub async fn restore_session_view(
         let session = restored.session;
         let mut turns = restored.turns;
         let interaction_snapshot = restored.interaction_snapshot;
-        let runtime_event_snapshot = restored
+        let execution_projection = restored.execution_projection;
+        let mut runtime_event_snapshot = restored
             .runtime_event_snapshot
             .map(frontend_event_projection_snapshot);
+        if execution_projection == Some("acp") {
+            if let Some(snapshot) = runtime_event_snapshot.as_mut() {
+                for event in &mut snapshot.events {
+                    enrich_acp_replay_event(&event.event_name, &mut event.payload);
+                }
+            }
+        }
         let current_context_usage = restored.current_context_usage;
         let total_turn_count = restored.total_turn_count;
         let turn_catalog = restored.turn_catalog;
@@ -3876,6 +3912,7 @@ pub async fn restore_session_view(
         );
 
         Ok(RestoreSessionViewResponse {
+            execution_projection,
             session: session_to_response_with_turn_count(session, total_turn_count),
             turns,
             interaction_snapshot,
@@ -3913,7 +3950,7 @@ pub async fn load_session_event_backfill(
     runtime: State<'_, DesktopRuntimeContext>,
     request: LoadSessionEventBackfillRequest,
 ) -> Result<serde_json::Value, String> {
-    Ok(session_event_backfill_to_response(
+    let mut response = session_event_backfill_to_response(
         runtime.session_application().session_events_since(
             &request.session_id,
             &request.stream_id,
@@ -3922,7 +3959,19 @@ pub async fn load_session_event_backfill(
         runtime
             .session_application()
             .session_interaction_snapshot(&request.session_id),
-    ))
+    );
+    if runtime
+        .session_application()
+        .has_acp_execution(&request.session_id)
+    {
+        if let Some(events) = response["events"].as_array_mut() {
+            for event in events {
+                let name = event["eventName"].as_str().unwrap_or_default().to_owned();
+                enrich_acp_replay_event(&name, &mut event["payload"]);
+            }
+        }
+    }
+    Ok(response)
 }
 
 #[derive(Debug, Deserialize)]
@@ -4256,6 +4305,20 @@ pub async fn get_available_modes(
         )
         .await;
 
+    let counts = if request.include_subagent_counts == Some(true) {
+        Some(
+            state
+                .agent_registry
+                .mode_manageable_subagent_counts(
+                    &mode_infos,
+                    workspace.as_ref().map(|record| record.id.as_str()),
+                    external_sources_supported,
+                )
+                .await,
+        )
+    } else {
+        None
+    };
     let dtos: Vec<ModeInfoDTO> = mode_infos
         .into_iter()
         .map(|info| {
@@ -4264,6 +4327,10 @@ pub async fn get_available_modes(
                 .clone()
                 .unwrap_or_else(|| info.id.clone());
             ModeInfoDTO {
+                manageable_subagent_count: counts
+                    .as_ref()
+                    .and_then(|counts| counts.get(&config_profile_id))
+                    .copied(),
                 id: info.id,
                 name: info.name,
                 description: info.description,
@@ -4288,6 +4355,7 @@ pub async fn get_available_modes(
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GetAvailableModesRequest {
+    pub include_subagent_counts: Option<bool>,
     pub workspace_id: Option<String>,
     pub workspace_path: Option<String>,
     pub remote_connection_id: Option<String>,
@@ -4316,6 +4384,8 @@ pub async fn get_default_review_team_definition() -> Result<ReviewTeamDefinition
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModeInfoDTO {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manageable_subagent_count: Option<usize>,
     pub id: String,
     pub name: String,
     pub description: String,
@@ -4425,6 +4495,19 @@ mod tests {
     use openbitfun_events::AgenticEvent;
     use openbitfun_product_domains::tool_permissions::{PermissionEffect, PermissionRule};
     use serde_json::json;
+
+    #[test]
+    fn legacy_mode_catalog_requests_do_not_require_summary_fields() {
+        let old: GetAvailableModesRequest =
+            serde_json::from_value(json!({"workspaceId":"workspace-1"})).unwrap();
+        assert_eq!(old.include_subagent_counts, None);
+        assert_eq!(old.workspace_id.as_deref(), Some("workspace-1"));
+        let new: GetAvailableModesRequest = serde_json::from_value(
+            json!({"workspaceId":"workspace-1","includeSubagentCounts":true}),
+        )
+        .unwrap();
+        assert_eq!(new.include_subagent_counts, Some(true));
+    }
 
     #[tokio::test]
     async fn mode_catalog_uses_record_kind_even_when_local_and_remote_paths_are_identical() {
@@ -4969,6 +5052,7 @@ mod tests {
     #[test]
     fn restore_turn_payload_stats_tracks_largest_outputs_without_contents() {
         let turn = DialogTurnData {
+            published_figures: Default::default(),
             turn_id: "turn-1".to_string(),
             turn_index: 0,
             session_id: "session-1".to_string(),
@@ -5060,6 +5144,7 @@ mod tests {
     #[test]
     fn omit_assistant_only_tool_results_preserves_visible_results() {
         let mut turns = vec![DialogTurnData {
+            published_figures: Default::default(),
             turn_id: "turn-1".to_string(),
             turn_index: 0,
             session_id: "session-1".to_string(),
@@ -5129,6 +5214,7 @@ mod tests {
     fn session_view_tool_result_compaction_truncates_large_visible_results() {
         let large_output = "x".repeat(80 * 1024);
         let mut turns = vec![DialogTurnData {
+            published_figures: Default::default(),
             turn_id: "turn-1".to_string(),
             turn_index: 0,
             session_id: "session-1".to_string(),

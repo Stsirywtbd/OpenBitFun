@@ -23,33 +23,10 @@ import { sessionWorktreeRootPath } from '@/flow_chat/utils/sessionWorktree';
 import { useSideAnchoredPopoverPosition } from '@/shared/utils/useSideAnchoredPopoverPosition';
 import ArchivedSessionMenuItems from '../sessions/ArchivedSessionMenuItems';
 import SessionDeleteMenuItem from '../sessions/SessionDeleteMenuItem';
-import { activateDeviceSlot, runDeviceSessionAction, type DeviceSessionAction } from './openOnDevice';
+import { activateDeviceSlot, type DeviceSessionAction } from './openOnDevice';
 import type { BackgroundActions } from './BackgroundSessionList';
 import type { SidebarDeviceSlot } from './useSidebarDevices';
-
-/** Intent key of a catalog session action; the row shows progress while it runs. */
-export const catalogSessionActionKey = (sessionId: string, kind: string) => `session-action:${sessionId}:${kind}`;
-
-const FAILURE_KEYS: Partial<Record<DeviceSessionAction['kind'], string>> = {
-  duplicate: 'nav.sessions.duplicateFailed',
-  'open-worktree': 'nav.sessions.openWorktreeWorkspaceFailed',
-  'reveal-storage': 'nav.sessions.openStorageDirectoryFailed',
-};
-
-export function runCatalogSessionAction(
-  actions: BackgroundActions,
-  peer: ReturnType<typeof usePeerDeviceModeOptional>,
-  slot: SidebarDeviceSlot,
-  sessionId: string,
-  action: DeviceSessionAction,
-  t: (key: string, options?: Record<string, unknown>) => string,
-): void {
-  actions.run(
-    catalogSessionActionKey(sessionId, action.kind),
-    () => runDeviceSessionAction(peer, slot, sessionId, action, t),
-    FAILURE_KEYS[action.kind] ?? 'nav.devices.sessionActionFailed',
-  );
-}
+import { catalogSessionActionKey, runCatalogSessionAction } from './catalogSessionActions';
 
 export const CatalogSessionMenu: React.FC<{
   slot: SidebarDeviceSlot;
@@ -100,6 +77,7 @@ export const CatalogSessionMenu: React.FC<{
 
   const isArchived = session.persistedStatus === 'archived';
   const isDispatched = isNonLocalDispatchTarget(session.config.dispatchTarget);
+  const sessionMutationDisabledReason = isDispatched ? t('nav.sessions.dispatchMutationUnsupported') : undefined;
   const capabilities = slot.isLocal
     ? null
     : peer?.attachments.find(attachment => attachment.deviceId === slot.deviceId)?.capabilities ?? null;
@@ -266,6 +244,8 @@ export const CatalogSessionMenu: React.FC<{
                 type="button"
                 leading={<Icon glyph={Archive} size="sm" />}
                 onClick={event => run(event, { kind: 'archive' })}
+                disabled={Boolean(sessionMutationDisabledReason)}
+                title={sessionMutationDisabledReason}
                 data-testid="nav-device-session-menu-archive"
               >
                 <span>{t('nav.sessions.archive')}</span>
@@ -275,7 +255,8 @@ export const CatalogSessionMenu: React.FC<{
                 sessionId={session.sessionId}
                 testId="nav-device-session-menu-delete"
                 label={t(session.externalHistory?.mode === 'follow' ? 'nav.sessions.removeSource' : 'nav.sessions.delete')}
-                description={t(session.externalHistory?.mode === 'follow' ? 'nav.sessions.removeSourceConfirmMessage' : 'nav.sessions.deleteConfirmMessage', { name: title })}
+                disabled={Boolean(sessionMutationDisabledReason)}
+                description={sessionMutationDisabledReason ?? t(session.externalHistory?.mode === 'follow' ? 'nav.sessions.removeSourceConfirmMessage' : 'nav.sessions.deleteConfirmMessage', { name: title })}
                 onConfirm={() => {
                   close();
                   runCatalogSessionAction(actions, peer, slot, session.sessionId, { kind: 'delete' }, t);

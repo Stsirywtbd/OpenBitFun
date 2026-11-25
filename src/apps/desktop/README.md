@@ -17,6 +17,11 @@ so newly exposed edges retain the page color while WebKit catches up. The sideba
 keeps its native material. Theme changes and sidebar geometry update this paint;
 translucent or image-backed scene surfaces retain their original composition.
 
+To compare WebView rendering cost without the native sidebar material on macOS
+and Windows, start the app with `OPENBITFUN_NATIVE_WINDOW_MATERIAL=0`. The main
+window then uses the opaque fallback that Windows builds before 22H2 already use;
+the default is unchanged.
+
 ## Model selection and smart routing
 
 **Release availability:** smart mode is not available in this release. The GUI
@@ -120,7 +125,8 @@ use the official Relay. Starting or stopping the LAN Relay does not switch their
 account or endpoint. LAN invitations advertise the selected network interface;
 select it again and create a new invitation after changing networks.
 
-The official device session is restored on restart. The embedded LAN connection
+Desktop restores the official device session on restart and uses the shared
+[device credential renewal schedule](../cli/README.md#always-on-account-device-host). The embedded LAN connection
 is temporary and starts when requested. Builds that previously saved a temporary
 LAN session in the account slot attempt to restore the official Relay from the
 shared identity; failed sign-in leaves the previous credential on disk. Signing
@@ -129,6 +135,56 @@ out closes both connections.
 Both modes require the online identity service for sign-in. Same-network mode
 does not provide offline login. See the [Relay FAQ](../relay-server/FAQ.md) for
 privacy, service availability, and private-deployment requirements.
+
+## Writing a LaTeX paper
+
+Choose **Other agents → Paper Writing** in the session composer and ask the
+agent to draft or revise files in your workspace. Open the main `.tex` file
+from the file tree or its chat link. The editor shows source on the left and the
+typeset PDF on the right. Use **Save & compile** or turn on **Auto compile**
+to save and recompile the main source after you pause. A failed build keeps the
+last successful preview and shows the compiler log. The source and PDF panes can
+be closed independently, restored from the header, and resized by dragging their
+divider. Hidden source views retain the document and its undo history.
+
+The source toolbar includes undo/redo, find/replace, a section outline, and
+snippets for equations, figures, tables, and references. Command, environment,
+and in-document label completions are available in Monaco. Select the main TeX
+entry when editing an included chapter, or add a `% !TeX root = ../main.tex`
+comment. Compiler diagnostics for the current file link back to their source line.
+
+PDF review supports text highlights, sticky notes, comment threads, freehand ink,
+annotation colors, resolution, deletion, and undo/redo. Reviews are automatically
+saved beside the source as `<source>.openbitfun-review.json`; include that file
+when moving or sharing the project. **Save PDF** writes an editable
+`<paper>.annotated.pdf` to the workspace. **Export annotated PDF** saves a copy
+on the viewing device. Saved PDFs embed their review state so notes and threads
+can be edited again when reopened in OpenBitFun; other PDF applications see
+standard PDF annotations. Replacing an existing output checks its current
+version and asks before overwriting an externally changed file. If the review
+file changes elsewhere while this window has unsaved notes, saving pauses until
+you choose **Replace with my notes** or **Load the file's notes**; Undo restores
+the notes replaced by loading. Encrypted PDFs can be reviewed, but **Save PDF**
+and **Export annotated PDF** are unavailable for them.
+
+Annotations retain PDF page coordinates across compilation. Check their positions
+when a revision changes the layout; after recompiling, the preview shows a
+reminder until you select **Positions checked**.
+LaTeX source remains the place to change manuscript text and figures.
+
+![LaTeX source, PDF preview, and review notes in a sample writing workspace](../../../docs/images/paper-writing-workbench.png)
+
+The image uses a sample paper in an isolated UI fixture.
+
+Install `latexmk` and the selected pdfLaTeX or XeLaTeX engine on the machine that
+owns the workspace. For SSH, Docker, and WSL workspaces, compile in that
+environment. In Peer Device Mode the selected Desktop host must advertise
+LaTeX preview support. Mobile and bot surfaces can continue an existing writing
+session and receive PDF files saved to the workspace by the agent.
+
+Preview compilation uses temporary files and accepts PDFs up to 8 MiB.
+It disables shell escape and skips `latexmk` configuration scripts.
+Enable automatic compilation for projects you trust.
 
 ## Global agent instructions
 
@@ -1025,6 +1081,21 @@ before the first selected-text question. Peer hosts must advertise
 `btw_model_pool_selection_v1` for these typed initial choices; older hosts retain
 the inherited path without silently replacing a pool with its current member.
 
+Settings → AI → Session & Memory → Side questions controls the default for new `/btw`
+sessions (`ai.btw.model_selection`). The default is `{ "kind": "inherit" }`, which
+retains the parent's model, reasoning and pool binding. A fixed model uses
+`{ "kind": "model", "model_ref": "<configured model id>" }`; a pool uses
+`{ "kind": "pool", "pool_id": "<pool id>" }`. An explicit choice inside a side
+question takes precedence and affects only that conversation. Changing the global
+BTW default does not change existing conversations. A different model starts with
+its own default reasoning, while inherited sessions retain the parent's reasoning.
+Unavailable saved choices remain stored and block new side questions until an
+explicit choice repairs or overrides them. Peers expose this setting only when the
+execution host advertises `btw_model_defaults_v1`; settings and model IDs belong to
+that host. SSH/Docker workspace side questions keep their parent's execution root.
+The host returns the committed model target with admission so the selector shows
+the actual choice without depending on a second request.
+
 Peer Device Mode routes pool operations to capable Desktop/CLI hosts. Standalone
 browser clients, detached dispatch, and ACP/external-agent model selection
 do not expose pool selection in this version. Mobile/IM clients can continue a
@@ -1079,3 +1150,30 @@ directory together with `workspace_data.json` in a full backup. A workspace meta
 export does not embed image bytes; missing assets display the default icon with a load warning
 and preserve the saved reference. Unreferenced assets are retained; resetting an icon does
 not delete another record's shared image. Unknown icon versions remain intact.
+
+## Control Desktop from a local application
+
+In **Settings → Browser & desktop control → External control**, enable local HTTP access. Choose a listening port (default 38371), name the integration, select its local project workspaces and create a token. Copy the token while it is displayed. Enter a browser origin only for a web page connecting directly. For a task board with its own backend, keep the token in that backend. Each integration can access only the sessions it creates. Revoke its token in the same settings section.
+
+Send requests to the API address shown in Settings with an `Authorization: Bearer <token>` header. The listener binds to IPv4 loopback. The workspace ID comes from the catalog on this desktop. The following example uses a token supplied through the environment.
+
+```sh
+base=http://127.0.0.1:38371/v1
+curl -sS -H "Authorization: Bearer $OBF_TOKEN" "$base/workspaces"
+
+curl -sS -H "Authorization: Bearer $OBF_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"workspaceId":"WORKSPACE_ID","title":"Review issue 17","prompt":"Summarize the affected code","idempotencyKey":"issue-17-attempt-1"}' \
+  "$base/turns"
+```
+
+| Request | Behavior |
+| --- | --- |
+| `GET /v1/capabilities` | Read the API version, execution host and supported operations. |
+| `GET /v1/workspaces` | List eligible local projects granted to this token. |
+| `POST /v1/turns` | Create a regular desktop session and start its first turn. Returns HTTP 202 with `sessionId`, `turnId`, `workspaceId` and admission state. To continue a session, send its `sessionId` and a fresh idempotency key, omitting the title. |
+| `GET /v1/turns/{turnId}` | Read current status, waiting reason through `awaiting_approval` or `awaiting_input`, and the terminal reply or error when available. |
+| `GET /v1/turns/{turnId}/events` | Subscribe to SSE `snapshot` events with the same bearer header. Use streaming fetch in a browser. Reconnect to receive the current snapshot. |
+| `POST /v1/turns/{turnId}/cancel` | Request cancellation of this turn. Read status to observe settlement. |
+| `POST /v1/turns/{turnId}/open` | Bring the desktop window forward and request navigation to the owning session. |
+
+Repeat a submission with the same key and payload after a lost response. Reusing the key for different content returns HTTP 409. A busy session also returns 409. A browser disconnect leaves an accepted turn running in Desktop. If Desktop exits during handoff, `outcome_unknown` preserves the original IDs for inspection. Desktop does not replay the prompt automatically. Busy work retains Desktop's normal tool and question handling. Remote workspaces, peer hosts and detached workers are outside this listener's execution scope.

@@ -1,3 +1,4 @@
+use crate::agentic::inline_figure::{verify_written_figure, written_figure_uri, MAX_SOURCE_BYTES};
 use crate::agentic::tools::file_permissions::file_permission_intents_allowing_managed_plan_edits;
 use crate::agentic::tools::file_tool_guidance::file_tool_guidance_message;
 use crate::agentic::tools::framework::{
@@ -49,16 +50,29 @@ impl FileEditTool {
         context: &ToolUseContext,
         resolved: &ToolPathResolution,
     ) -> OpenBitFunResult<String> {
-        context
+        const MAX_EDIT_BYTES: usize = 8 * 1024 * 1024;
+        let bytes = context
             .file_system_for_path(resolved)?
-            .read_file_text(&resolved.resolved_path)
+            .read_file_bounded(&resolved.resolved_path, MAX_EDIT_BYTES)
             .await
             .map_err(|error| {
                 OpenBitFunError::tool(format!(
                     "Failed to read file {}: {:#}",
                     resolved.logical_path, error
                 ))
-            })
+            })?
+            .ok_or_else(|| {
+                OpenBitFunError::tool(format!(
+                    "Edit exceeds the {MAX_EDIT_BYTES} byte limit for {}",
+                    resolved.logical_path
+                ))
+            })?;
+        String::from_utf8(bytes).map_err(|error| {
+            OpenBitFunError::tool(format!(
+                "Failed to decode {} as UTF-8: {error}",
+                resolved.logical_path
+            ))
+        })
     }
 }
 
@@ -338,8 +352,7 @@ impl Tool for FileEditTool {
         )
         .await;
 
-        let result = ToolResult::Result {
-            data: json!({
+        let mut data = json!({
                 "file_path": resolved.logical_path,
                 "old_string": old_string,
                 "new_string": new_string,
@@ -348,8 +361,28 @@ impl Tool for FileEditTool {
                 "start_line": edit_result.edit_result.start_line,
                 "old_end_line": edit_result.edit_result.old_end_line,
                 "new_end_line": edit_result.edit_result.new_end_line,
-            }),
-            result_for_assistant: Some(edit_success_message(&resolved.logical_path)),
+        });
+        // The editor supports normalized and fuzzy matches. Preserve its exact
+        // output for inline replay instead of reimplementing those rules in JS.
+        let mut assistant_message = edit_success_message(&resolved.logical_path);
+        if let Some(uri) = written_figure_uri(context, &resolved) {
+            verify_written_figure(
+                context,
+                &uri,
+                &edit_result.new_content,
+                &mut data,
+                &mut assistant_message,
+            )
+            .await;
+            data["visualization_uri"] = json!(uri);
+            data["content_bytes"] = json!(edit_result.new_content.len());
+            if (1..=MAX_SOURCE_BYTES).contains(&edit_result.new_content.len()) {
+                data["visualization_source"] = json!(edit_result.new_content);
+            }
+        }
+        let result = ToolResult::Result {
+            data,
+            result_for_assistant: Some(assistant_message),
             image_attachments: None,
         };
 

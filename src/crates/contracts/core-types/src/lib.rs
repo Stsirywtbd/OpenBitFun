@@ -9,9 +9,11 @@ pub mod ai;
 pub mod background_delivery;
 pub mod errors;
 pub mod installer_config_handoff;
+pub mod magpie;
 pub mod model;
 pub mod model_pool;
 pub mod product_identity;
+pub mod responses;
 pub mod session;
 pub mod session_usage;
 pub mod speech;
@@ -23,8 +25,8 @@ pub mod worktree;
 
 pub use ai::{
     AIConfig, ConnectionTestMessageCode, ConnectionTestResult, ImageDialect, Message,
-    ModelAccountOrigin, ModelReasoningSummaryPart, ModelRequestContext, ModelResponseReplay,
-    ModelResponseReplayItem, ModelsDevCatalogSource, ModelsDevCatalogStatus,
+    ModelAccountOrigin, ModelReasoningContentPart, ModelReasoningSummaryPart, ModelRequestContext,
+    ModelResponseReplay, ModelResponseReplayItem, ModelsDevCatalogSource, ModelsDevCatalogStatus,
     ModelsDevReasoningCatalog, ModelsDevReasoningModel, ModelsDevReasoningProvider,
     ModelsDevRefreshResult, ModelsDevRefreshStatus, ProviderCatalog, ProviderCatalogEndpoint,
     ProviderCatalogModel, ProviderCatalogModelCapabilities, ProviderCatalogModelLimits,

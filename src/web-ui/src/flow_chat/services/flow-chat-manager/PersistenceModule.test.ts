@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { activateSurface, getActiveSurfaceId } from '@/infrastructure/peer-device/deviceSurface';
 import type { DialogTurn, ModelRound } from '../../types/flow-chat';
 import {
+  calculateTurnHash,
   convertDialogTurnToBackendFormat,
   debouncedSaveDialogTurn,
   immediateSaveDialogTurn,
@@ -120,6 +121,17 @@ describe('PersistenceModule', () => {
     },
   );
 
+  it('lets the ACP host persist its own turn and checkpoints turns from older hosts', async () => {
+    const turn = createDialogTurn('completed');
+    const context = createContext(turn, { workspaceId: 'workspace-local', config: { agentType: 'acp:codex' } });
+    turn.userMessage.metadata = { acpRuntimeOwnsHistory: true };
+    await saveDialogTurnToDisk(context, SESSION_ID, TURN_ID);
+    expect(mockSaveSessionTurn).not.toHaveBeenCalled();
+    delete turn.userMessage.metadata.acpRuntimeOwnsHistory;
+    await saveDialogTurnToDisk(context, SESSION_ID, TURN_ID);
+    expect(mockSaveSessionTurn).toHaveBeenCalledOnce();
+  });
+
   it('saves a visible result receipt with its retained generation and no metadata read', async () => {
     const turn = createDialogTurn('completed');
     turn.recoveryEpoch = 2;
@@ -194,6 +206,27 @@ describe('PersistenceModule', () => {
     } finally {
       activateSurface(original);
     }
+  });
+
+  it('skips a full checkpoint when the stored record cannot be read', async () => {
+    mockSaveSessionMetadata.mockClear();
+    mockLoadSessionMetadata.mockReset().mockRejectedValue(new Error('SSH channel closed'));
+    await updateSessionMetadata(createContext(createDialogTurn('completed')), SESSION_ID);
+    expect(mockSaveSessionMetadata).not.toHaveBeenCalled();
+  });
+
+  it('never writes a remote placeholder title over the persisted session name', async () => {
+    mockSaveSessionMetadata.mockClear();
+    mockLoadSessionMetadata.mockReset().mockResolvedValue({ sessionId: SESSION_ID, sessionName: 'Fuse gate kernels' });
+    await updateSessionMetadata(
+      createContext(createDialogTurn('completed'), { title: 'Remote Session', externalPlaceholder: true }),
+      SESSION_ID,
+    );
+    expect(mockSaveSessionMetadata).toHaveBeenCalledTimes(1);
+    const fields = mockSaveSessionMetadata.mock.calls[0][2] as string[];
+    expect(fields).not.toContain('sessionName');
+    expect(fields).not.toContain('titleMetadata');
+    expect(fields).toContain('needsUserAttention');
   });
 
   it('preserves actual routing facts in frontend checkpoints', () => {
@@ -522,5 +555,25 @@ describe('PersistenceModule', () => {
       expect.objectContaining({ turnIndex: 140 }),
       'workspace-local',
     );
+  });
+
+  it('computes deterministic structural turn hashes without JSON.stringify', () => {
+    const stringifySpy = vi.spyOn(JSON, 'stringify');
+    const base = createDialogTurn('processing');
+    base.modelRounds[0].items = [
+      { id: 't1', type: 'text', content: 'hello world', isStreaming: true, timestamp: 1001 } as any,
+    ];
+    const clone = structuredClone(base);
+    expect(calculateTurnHash(base)).toBe(calculateTurnHash(clone));
+    expect(stringifySpy).not.toHaveBeenCalled();
+
+    const changedText = structuredClone(base);
+    (changedText.modelRounds[0].items[0] as any).content = 'hello world!';
+    expect(calculateTurnHash(changedText)).not.toBe(calculateTurnHash(base));
+
+    const completed = structuredClone(base);
+    completed.status = 'completed';
+    expect(calculateTurnHash(completed)).not.toBe(calculateTurnHash(base));
+    stringifySpy.mockRestore();
   });
 });

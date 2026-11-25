@@ -17,7 +17,7 @@ use openbitfun_agent_runtime::sdk::{
     SessionEventJournal, SessionEventProjectionSnapshot, SessionInteractionSnapshot,
 };
 use openbitfun_core::agentic::coordination::{ConversationCoordinator, DialogScheduler};
-use openbitfun_core::agentic::core::Session;
+use openbitfun_core::agentic::core::{ProcessingPhase, Session, SessionState};
 use openbitfun_core::agentic::persistence::{SessionBranchResult, SessionMetadataPage};
 use openbitfun_core::agentic::session::SessionViewRestoreTiming;
 use openbitfun_core::product_runtime::{CoreAgentRuntimeCompatibility, CoreProductAgentRuntime};
@@ -27,7 +27,7 @@ use openbitfun_core::service::remote_ssh::SSHConnectionManager;
 use openbitfun_core::service::session::{
     DialogTurnData, DialogTurnKind, SessionContextUsage, SessionMetadata, SessionStatus,
     SessionTranscriptExport, SessionTranscriptExportOptions, SessionTurnCatalog,
-    SessionTurnWindowResponse,
+    SessionTurnWindowResponse, SESSION_PROVIDER_ACP, SESSION_PROVIDER_METADATA_KEY,
 };
 use openbitfun_core::service::session_usage::SessionUsageReport;
 use openbitfun_core::service::token_usage::TokenUsageService;
@@ -125,6 +125,7 @@ fn local_command_turn_record_request(
 
 #[derive(Debug)]
 pub(crate) struct DesktopSessionViewRestore {
+    pub execution_projection: Option<&'static str>,
     pub session: Session,
     pub turns: Vec<DialogTurnData>,
     pub interaction_snapshot: SessionInteractionSnapshot,
@@ -228,9 +229,24 @@ impl DesktopSessionScopeResolver {
     }
 }
 
+pub(crate) struct DesktopSessionExecutionSnapshot {
+    pub running: bool,
+    pub projection: SessionEventProjectionSnapshot,
+}
+
 #[async_trait]
 pub(crate) trait DesktopSessionHostEffects: Send + Sync {
     async fn release_session(&self, session_id: &str);
+    fn forget_session_recovery(&self, _session_id: &str) {}
+    async fn recover_acp_history(&self, _path: &Path, _session: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn supports_acp_projection(&self) -> bool {
+        false
+    }
+    fn acp_execution_snapshot(&self, _session_id: &str) -> Option<DesktopSessionExecutionSnapshot> {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -606,6 +622,7 @@ impl DesktopSessionApplication {
         include_hidden_subagents: bool,
         include_system_prompt_preview: bool,
         context_preview_category: Option<openbitfun_core_types::UsageContextCategory>,
+        context_estimate: Option<openbitfun_core_types::UsageContextEstimateRequest>,
     ) -> DesktopSessionApplicationResult<SessionUsageReport> {
         let scope = self.resolved_scope(request).await?;
         let storage_path = self.storage_path(&scope);
@@ -620,6 +637,7 @@ impl DesktopSessionApplication {
                 include_hidden_subagents,
                 include_system_prompt_preview,
                 context_preview_category,
+                context_estimate,
             })
             .await
             .map_err(|error| DesktopSessionApplicationError::Runtime(error.into_message()))?;
@@ -860,8 +878,42 @@ impl DesktopSessionApplication {
         stream_id: &str,
         cursor: u64,
     ) -> Option<SessionEventBackfill> {
-        self.agent_runtime
-            .session_events_since(session_id, stream_id, cursor)
+        let mut backfill = self
+            .agent_runtime
+            .session_events_since(session_id, stream_id, cursor)?;
+        if let SessionEventBackfill::Delta {
+            cursor: end,
+            events,
+            ..
+        } = &mut backfill
+        {
+            if matches!(
+                events.last(),
+                Some(
+                    openbitfun_events::AgenticEvent::DialogTurnCompleted { .. }
+                        | openbitfun_events::AgenticEvent::DialogTurnCancelled { .. }
+                        | openbitfun_events::AgenticEvent::DialogTurnFailed { .. }
+                )
+            ) {
+                if let Some(acp) = self.host_effects.acp_execution_snapshot(session_id) {
+                    // The history write fences terminal delivery for both live subscribers and cursor readers.
+                    if acp.running
+                        && acp.projection.stream_id == stream_id
+                        && acp.projection.cursor < *end
+                    {
+                        events.pop();
+                        *end = acp.projection.cursor;
+                    }
+                }
+            }
+        }
+        Some(backfill)
+    }
+
+    pub(crate) fn has_acp_execution(&self, session_id: &str) -> bool {
+        self.host_effects
+            .acp_execution_snapshot(session_id)
+            .is_some()
     }
 
     pub(crate) async fn restore_session_view<F>(
@@ -881,6 +933,34 @@ impl DesktopSessionApplication {
         let resolve_storage_path_duration_ms =
             path_started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
         on_storage_path_resolved(resolve_storage_path_duration_ms);
+        let metadata = self
+            .compatibility
+            .load_persisted_session_metadata(&storage_path, session_id)
+            .await
+            .map_err(desktop_core_session_error)?;
+        if self.host_effects.supports_acp_projection()
+            && metadata.as_ref().is_some_and(|m| {
+                m.agent_type.starts_with("acp:")
+                    || m.custom_metadata
+                        .as_ref()
+                        .and_then(|v| v.get(SESSION_PROVIDER_METADATA_KEY))
+                        .and_then(serde_json::Value::as_str)
+                        == Some(SESSION_PROVIDER_ACP)
+            })
+        {
+            // The saved history is readable even when this recovery cannot write.
+            // Opening must not depend on it; the next send retries and reports.
+            if let Err(error) = self
+                .host_effects
+                .recover_acp_history(&storage_path, session_id)
+                .await
+            {
+                log::warn!(
+                    "Failed to recover interrupted ACP history while restoring a session: session_id={session_id} error={error}"
+                );
+            }
+        }
+        let current_context_usage = metadata.and_then(|m| m.current_context_usage);
         let (mut session, turns, total_turn_count, turn_catalog, mut timings) = self
             .compatibility
             .restore_session_view_from_storage_path(
@@ -897,17 +977,38 @@ impl DesktopSessionApplication {
             .map_err(|error| DesktopSessionApplicationError::Core(error.to_string()))?;
         overlay_live_session_state(&mut session, live_session);
         let interaction_snapshot = self.agent_runtime.session_interaction_snapshot(session_id);
-        let runtime_event_snapshot = self
+        let mut runtime_event_snapshot = self
             .agent_runtime
             .session_event_projection_snapshot(session_id);
-        let current_context_usage = self
-            .compatibility
-            .load_persisted_session_metadata(&storage_path, session_id)
-            .await
-            .map_err(desktop_core_session_error)?
-            .and_then(|metadata| metadata.current_context_usage);
+        // Native coordinator state is not the execution authority for an
+        // external ACP prompt. Read its facts without acquiring its long-held
+        // protocol session mutex. The journal is shared with live delivery.
+        let execution_projection = if session.agent_type.starts_with("acp:")
+            && self.host_effects.supports_acp_projection()
+        {
+            if let Some(acp) = self.host_effects.acp_execution_snapshot(session_id) {
+                session.state = if acp.running {
+                    SessionState::Processing {
+                        current_turn_id: acp.projection.active_turn_id.clone().unwrap_or_default(),
+                        phase: ProcessingPhase::Streaming,
+                    }
+                } else {
+                    SessionState::Idle
+                };
+                runtime_event_snapshot = Some(acp.projection);
+            } else {
+                // No prompt is owned by this host process. Do not revive a
+                // pre-restart execution from a persisted intermediate record.
+                session.state = SessionState::Idle;
+                runtime_event_snapshot = None;
+            }
+            Some("acp")
+        } else {
+            None
+        };
         timings.resolve_storage_path_duration_ms = resolve_storage_path_duration_ms;
         Ok(DesktopSessionViewRestore {
+            execution_projection,
             session,
             turns,
             interaction_snapshot,
@@ -1015,6 +1116,7 @@ async fn delete_session_with_host_effects(
         })
         .await
         .map_err(|error| DesktopSessionApplicationError::Runtime(error.into_message()))?;
+    host_effects.forget_session_recovery(&session_id);
     Ok(())
 }
 

@@ -18,6 +18,8 @@ const boundary = vi.hoisted(() => ({
   startConnection: vi.fn(),
   stopConnection: vi.fn(),
   stopBot: vi.fn(),
+  weixinQrPoll: vi.fn(),
+  configureBot: vi.fn(),
   getFormState: vi.fn(),
   listeners: new Map<string, Set<(payload: unknown) => void>>(),
   jobs: {},
@@ -33,6 +35,9 @@ vi.mock('@/infrastructure/api/service-api/RemoteConnectAPI', async importOrigina
     startConnection: boundary.startConnection,
     stopConnection: boundary.stopConnection,
     stopBot: boundary.stopBot,
+    weixinQrStart: vi.fn().mockResolvedValue({ session_key: 'scan-session', qr_image_url: 'qr.png' }),
+    weixinQrPoll: boundary.weixinQrPoll,
+    configureBot: boundary.configureBot,
     getFormState: boundary.getFormState,
     setFormState: vi.fn().mockResolvedValue(undefined),
     getLanNetworkInfo: vi.fn().mockResolvedValue({ local_ip: '192.168.1.2', available_ips: [{ ip: '192.168.1.2', interface_name: 'en0' }] }),
@@ -279,6 +284,28 @@ describe('Remote Connect shared status through the real dialog and sidebar', () 
       .toBe('remoteConnect.stateConnected');
   });
 
+  it('discards a pending WeChat scan when the CLI disables control and preserves saved bot preferences', async () => {
+    boundary.backend = status({ bot_connected: null, remote_control_allowed: true });
+    const poll = deferred<{ status: string; ilink_token: string; bot_account_id: string }>();
+    boundary.weixinQrPoll.mockReturnValueOnce(poll.promise);
+    await render('bot');
+    await click(element('#remote-connect-bot-tab-weixin'));
+    await clickText('remoteConnect.botWeixinQrButton');
+    expect(boundary.weixinQrPoll).toHaveBeenCalledTimes(1);
+
+    boundary.backend = status({ bot_connected: null, remote_control_allowed: false });
+    await tick();
+    boundary.backend = status({ bot_connected: null, remote_control_allowed: true });
+    await tick();
+    await act(async () => {
+      poll.resolve({ status: 'confirmed', ilink_token: 'fixture', bot_account_id: 'fixture' });
+    });
+    expect(boundary.configureBot).not.toHaveBeenCalled();
+    expect(boundary.startConnection).not.toHaveBeenCalled();
+    expect(boundary.stopBot).not.toHaveBeenCalled();
+    expect(dialog().textContent).toContain('remoteConnect.botWeixinQrButton');
+  });
+
   it('explains the single chat-app connection and labels the detail switch', async () => {
     await render('bot');
     await tick();
@@ -415,6 +442,25 @@ describe('Remote Connect shared status through the real dialog and sidebar', () 
       expect.objectContaining({ method: 'openbitfun_server', relay_connected: true }),
     ]);
     expect(attachedMobile()).not.toBeNull();
+  });
+
+  it('shows the invitation when the start it is waiting on publishes an account login', async () => {
+    const pending = deferred<ConnectionResult>();
+    boundary.startConnection.mockReturnValueOnce(pending.promise);
+    await render();
+    await generateInvitation();
+    await act(async () => {
+      boundary.backend = status({ relay_connected: true, relay_url: relayA, active_method: 'openbitfun_server' });
+      for (const listener of boundary.listeners.get('account://login-state') ?? []) {
+        listener({ logged_in: true, relay_url: relayA });
+      }
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => { pending.resolve(invitation()); });
+    await tick();
+    expect(dialog().textContent).toContain(invitation().qr_url);
+    expect(dialog().textContent).not.toContain('remoteConnect.connecting');
+    expect(boundary.stopConnection).not.toHaveBeenCalled();
   });
 
   it('keeps the LAN invitation when the official credential expires', async () => {

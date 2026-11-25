@@ -381,6 +381,10 @@ pub struct OpenWorkspaceRequest {
     pub remote_connection_id: Option<String>,
 }
 
+fn default_promote_if_opened() -> bool {
+    true
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenRemoteWorkspaceRequest {
@@ -394,6 +398,11 @@ pub struct OpenRemoteWorkspaceRequest {
     /// connection to `connection_id`.
     #[serde(default)]
     pub rebind_connection: bool,
+    /// Move an already-opened record to the front of the project section.
+    /// Legacy callers omit this field and keep the explicit-open default (`true`);
+    /// background SSH restore sets `false` so reconnecting does not reorder rows.
+    #[serde(default = "default_promote_if_opened")]
+    pub promote_if_opened: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1492,6 +1501,7 @@ pub async fn open_remote_workspace(
         },
         auto_set_current: true,
         add_to_recent: true,
+        promote_if_opened: request.promote_if_opened,
         workspace_kind: WorkspaceKind::Remote,
         assistant_id: None,
         display_name: Some(display_name),
@@ -1873,6 +1883,28 @@ mod assistant_workspace_delete_tests {
             assistant_workspace_directory_plan(&orphan, false),
             Ok(AssistantWorkspaceDirectoryPlan::RegistryEntryOnly)
         );
+    }
+
+    #[test]
+    fn open_remote_workspace_request_defaults_promote_if_opened_for_legacy_payloads() {
+        let legacy: super::OpenRemoteWorkspaceRequest = serde_json::from_value(serde_json::json!({
+            "remotePath": "/srv/app",
+            "connectionId": "ssh-prod",
+            "connectionName": "Prod",
+        }))
+        .expect("legacy payload should deserialize");
+        assert!(legacy.promote_if_opened);
+        assert!(!legacy.rebind_connection);
+
+        let background_restore: super::OpenRemoteWorkspaceRequest =
+            serde_json::from_value(serde_json::json!({
+                "remotePath": "/srv/app",
+                "connectionId": "ssh-prod",
+                "connectionName": "Prod",
+                "promoteIfOpened": false,
+            }))
+            .expect("background restore payload should deserialize");
+        assert!(!background_restore.promote_if_opened);
     }
 }
 
@@ -6444,4 +6476,18 @@ pub async fn set_workspace_icon(
     request: openbitfun_core::service::workspace::SetWorkspaceIconRequest,
 ) -> Result<openbitfun_core::service::workspace::WorkspaceIconSnapshot, String> {
     state.workspace_service.set_workspace_icon(request).await
+}
+
+/// Detect Magpie on the selected inference host without running inference.
+#[tauri::command]
+pub async fn probe_magpie_gateway(
+    state: State<'_, AppState>,
+    request: openbitfun_core_types::magpie::MagpieProbeRequest,
+) -> Result<openbitfun_core_types::magpie::MagpieProbeResult, String> {
+    let config: openbitfun_core::service::config::GlobalConfig = state
+        .config_service
+        .get_config(None)
+        .await
+        .map_err(|_| "Failed to read proxy configuration".to_string())?;
+    Ok(openbitfun_core::infrastructure::ai::magpie::probe(request, Some(config.ai.proxy)).await)
 }

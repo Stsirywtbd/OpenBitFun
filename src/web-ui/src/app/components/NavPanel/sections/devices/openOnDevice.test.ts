@@ -66,7 +66,6 @@ vi.mock('@/infrastructure/services/business/workspaceManager', () => ({
   workspaceManager: { getState: () => ({ openedWorkspaces: mocks.workspaces }), setActiveWorkspace: vi.fn() },
 }));
 vi.mock('@/app/utils/projectSessionWorkspace', () => ({
-  findReusableEmptySessionId: () => null,
   flowChatSessionConfigForWorkspace: (workspace: { id: string }) => ({ workspaceId: workspace.id }),
 }));
 vi.mock('../workspaces/openLatestAssistantSession', () => ({ openLatestAssistantSession: mocks.openLatestAssistant }));
@@ -208,6 +207,16 @@ describe('openOnDevice', () => {
     it.each(['archive', 'delete'] as const)('does not %s when a newer switch superseded the action', async kind => {
       mocks.sessions.set('s-1', seeded);
       await runDeviceSessionAction(peerContext('superseded'), peerSlot, 's-1', { kind }, t);
+      expect(mocks.archiveRow).not.toHaveBeenCalled();
+      expect(mocks.deleteRow).not.toHaveBeenCalled();
+    });
+
+    it.each(['archive', 'delete'] as const)('does not %s after switching devices during metadata promotion', async kind => {
+      mocks.sessions.set('s-1', seeded);
+      mocks.promote.mockImplementationOnce(async () => {
+        activateSurface(localSlot.surfaceId);
+      });
+      await runDeviceSessionAction(peerContext(), peerSlot, 's-1', { kind }, t);
       expect(mocks.archiveRow).not.toHaveBeenCalled();
       expect(mocks.deleteRow).not.toHaveBeenCalled();
     });
