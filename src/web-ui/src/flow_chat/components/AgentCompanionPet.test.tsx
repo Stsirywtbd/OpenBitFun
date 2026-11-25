@@ -65,8 +65,8 @@ describe('AgentCompanionPet renderer routing', () => {
     ));
 
     expect(container.querySelector('.living-line-pet')?.getAttribute('data-openbitfun-state')).toBe('question');
-    expect(container.querySelector('svg.living-line-art')?.getAttribute('viewBox')).toBe('0 0 256 144');
-    expect(onSize).toHaveBeenCalledWith({ width: 288, height: 192 });
+    expect(container.querySelector('svg.living-line-art')?.getAttribute('viewBox')).toBe('32 29 192 85.33333333333333');
+    expect(onSize).toHaveBeenCalledWith({ width: 216, height: 96 });
     expect(resolvePet).not.toHaveBeenCalled();
   });
 });
