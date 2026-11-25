@@ -31,7 +31,7 @@
     },
     {
       "root": "src/web-ui",
-      "domain": "appUi",
+      "domain": "desktopPet",
       "key": "#ffffff06 <-> #ffffff08",
       "decision": "keep",
       "owner": "src/web-ui/src/flow_chat/components/living-line/preview.scss",
@@ -40,7 +40,7 @@
     },
     {
       "root": "src/web-ui",
-      "domain": "appUi",
+      "domain": "desktopPet",
       "key": "#ffffff20 <-> #ffffff24",
       "decision": "keep",
       "owner": "src/web-ui/src/flow_chat/components/living-line/preview.scss",

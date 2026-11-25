@@ -213,6 +213,15 @@ export const COLOR_DOMAIN_RULES = [
     label: 'Product identity effects',
     pathParts: ['app/components/SplashScreen'],
   },
+  {
+    key: 'desktopPet',
+    label: 'Desktop companion pet identity',
+    pathParts: [
+      'flow_chat/components/living-line',
+      'flow_chat/components/grok-live',
+      'public/agent-companion-pets',
+    ],
+  },
 ];
 
 export const COLOR_DOMAIN_KEYS = [
@@ -309,6 +318,12 @@ export const COLOR_DOMAIN_CONTRACTS = [
     owner: 'src/web-ui/src/app/components/SplashScreen',
     reason: 'The product splash owns identity-specific decorative gradients that remain separate from interactive UI state semantics.',
     mergePolicy: 'Keep only brand identity effects here and promote any reusable interface state to a canonical semantic theme token.',
+  },
+  {
+    key: 'desktopPet',
+    owner: 'src/web-ui/src/flow_chat/components/living-line; src/web-ui/src/flow_chat/components/grok-live; src/web-ui/public/agent-companion-pets',
+    reason: 'The desktop companion renderers own pet identity palettes (matter, eyes, flow lines, and the standalone motion-study preview) that are user-selectable appearance values instead of interactive app surface states.',
+    mergePolicy: 'Keep only pet identity and renderer-internal shading here; bubble, menu, and settings controls that read as product UI stay on canonical semantic theme tokens, and pet palettes must be reachable from the Appearance settings surface.',
   },
 ];
 
